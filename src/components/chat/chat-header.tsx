@@ -21,7 +21,7 @@ export function ChatHeader({ onReset, canReset }: ChatHeaderProps) {
           </div>
           <div className="leading-tight">
             <h1 className="text-sm font-semibold tracking-tight">
-              دروازه هوش مصنوعی
+              Demora AI Hub
             </h1>
             <p className="hidden text-[11px] text-muted-foreground sm:block">
               دستیار امن سازمانی · فاز ۱
