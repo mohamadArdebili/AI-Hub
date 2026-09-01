@@ -11,6 +11,12 @@ export interface ChatMessage {
   pending?: boolean;
   /** Set when generating the message failed. */
   error?: string;
+  /** True when the message was blocked by the policy engine. */
+  blocked?: boolean;
+  /** Human-readable reasons for blocking (Persian). */
+  blockedReasons?: string[];
+  /** Rules that triggered the block. */
+  blockedRules?: Array<{ code: string; title: string; severity: string }>;
 }
 
 export interface ChatApiRequest {
@@ -22,11 +28,15 @@ export interface ChatApiRequest {
  * Each chunk carries an incremental piece of the assistant reply.
  */
 export interface ChatStreamChunk {
-  type: "delta" | "done" | "error";
+  type: "delta" | "done" | "error" | "blocked";
   /** Partial text to append (for "delta"). */
   content?: string;
   /** Full final message id (for "done"). */
   messageId?: string;
   /** Error message (for "error"). */
   message?: string;
+  /** Reason for blocking (for "blocked"). */
+  reason?: string;
+  /** Matched rules (for "blocked"). */
+  matchedRules?: Array<{ code: string; title: string; severity: string }>;
 }

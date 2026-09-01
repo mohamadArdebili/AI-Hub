@@ -2,7 +2,7 @@
 
 import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { Check, Copy, User } from "lucide-react";
+import { Check, Copy, User, ShieldAlert } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -17,6 +17,12 @@ function ChatMessageBase({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
   const isPending = message.pending;
   const isEmpty = !message.content && isPending;
+  const isBlocked = message.blocked;
+
+  // Blocked message — special alert card
+  if (!isUser && isBlocked) {
+    return <BlockedMessage reasons={message.blockedReasons} rules={message.blockedRules} />;
+  }
 
   return (
     <div
@@ -49,7 +55,6 @@ function ChatMessageBase({ message }: ChatMessageProps) {
             <div className="chat-markdown">
               <ReactMarkdown
                 components={{
-                  // Open external links in a new tab safely.
                   a: ({ node: _n, ...props }) => (
                     <a
                       {...props}
@@ -97,6 +102,76 @@ function ChatMessageBase({ message }: ChatMessageProps) {
   );
 }
 
+// ─── Blocked Message Component ─────────────────────────────────────────────
+
+function BlockedMessage({
+  reasons,
+  rules,
+}: {
+  reasons?: string[];
+  rules?: Array<{ code: string; title: string; severity: string }>;
+}) {
+  const severityColor: Record<string, string> = {
+    CRITICAL: "bg-red-500/10 text-red-600 dark:text-red-400 border-red-500/20",
+    HIGH: "bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20",
+    MEDIUM: "bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/20",
+    LOW: "bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20",
+  };
+
+  return (
+    <div
+      className="mx-auto w-full max-w-[85%] px-4 py-5 sm:max-w-[80%]"
+      role="alert"
+      aria-live="assertive"
+    >
+      <div className="animate-chat-fade-in rounded-2xl border border-destructive/30 bg-destructive/5 p-4">
+        <div className="mb-2 flex items-center gap-2">
+          <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-destructive/10">
+            <ShieldAlert className="size-4 text-destructive" />
+          </div>
+          <h3 className="text-sm font-semibold text-destructive">
+            درخواست مسدود شد
+          </h3>
+        </div>
+
+        <p className="mb-3 text-sm leading-relaxed text-foreground/80">
+          این درخواست بر اساس سیاست‌های سازمان محرمانه تشخیص داده شد و ارسال نشد.
+        </p>
+
+        {reasons && reasons.length > 0 && (
+          <div className="mb-3 space-y-1">
+            {reasons.map((reason, i) => (
+              <p key={i} className="text-xs leading-relaxed text-muted-foreground">
+                • {reason}
+              </p>
+            ))}
+          </div>
+        )}
+
+        {rules && rules.length > 0 && (
+          <div className="flex flex-wrap gap-1.5">
+          {rules.map((rule) => (
+            <span
+              key={rule.code}
+              className={cn(
+                "inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium",
+                severityColor[rule.severity] ?? severityColor.MEDIUM
+              )}
+            >
+              <span className="font-mono">{rule.code}</span>
+              <span className="opacity-70">·</span>
+              <span>{rule.title}</span>
+            </span>
+          ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Avatar ─────────────────────────────────────────────────────────────────
+
 function Avatar({ role }: { role: "user" | "assistant" }) {
   if (role === "user") {
     return (
@@ -129,6 +204,8 @@ function ShieldSparkIcon({ className }: { className?: string }) {
     </svg>
   );
 }
+
+// ─── Message Actions ────────────────────────────────────────────────────────
 
 function MessageActions({
   text,
@@ -174,6 +251,8 @@ function MessageActions({
     </div>
   );
 }
+
+// ─── Code Block ─────────────────────────────────────────────────────────────
 
 function CodeBlock({
   className,

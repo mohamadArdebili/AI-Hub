@@ -1,4 +1,13 @@
+import crypto from "crypto";
 import { NextRequest } from "next/server";
+
+import { getAuthSession } from "@/lib/auth";
+import { evaluate } from "@/lib/policy";
+import {
+  getActivePolicyDocument,
+  getPolicySnapshot,
+  createDecisionLog,
+} from "@/lib/db";
 import type { ChatStreamChunk } from "@/lib/chat-types";
 
 export const runtime = "nodejs";
@@ -13,6 +22,12 @@ type NormalizedMessage = {
 
 function jsonError(message: string, status = 400) {
   return Response.json({ error: message }, { status });
+}
+
+/** Replace digits with * for safe preview, truncate to 120 chars */
+function maskPreview(text: string, maxLen = 120): string {
+  const masked = text.replace(/\d/g, "*");
+  return masked.length > maxLen ? masked.slice(0, maxLen) + "…" : masked;
 }
 
 function parseSseEvents(
@@ -37,6 +52,16 @@ function parseSseEvents(
 }
 
 export async function POST(req: NextRequest) {
+  // ── Auth check ────────────────────────────────────────────────────────
+  const session = await getAuthSession(req);
+  if (!session?.user) {
+    return jsonError("دسترسی غیرمجاز", 401);
+  }
+
+  const userId = session.user.id;
+  const organizationId = session.user.organizationId;
+
+  // ── Parse body ────────────────────────────────────────────────────────
   let body: { messages?: unknown };
 
   try {
@@ -80,6 +105,79 @@ export async function POST(req: NextRequest) {
   // جلوگیری از ارسال تاریخچه‌های بسیار طولانی
   const messages = normalized.slice(-30);
 
+  // ── Find the last user message ────────────────────────────────────────
+  const lastUserMessage = [...messages]
+    .reverse()
+    .find((m) => m.role === "user")?.content;
+
+  if (!lastUserMessage) {
+    return jsonError("هیچ پیام کاربری یافت نشد.");
+  }
+
+  // ── Policy evaluation ────────────────────────────────────────────────
+  const policySnapshot = await getPolicySnapshot(organizationId);
+
+  const decision = await evaluate({
+    prompt: lastUserMessage,
+    organizationId,
+    policySnapshot,
+  });
+
+  // ── Log the decision ─────────────────────────────────────────────────
+  const promptHash = crypto
+    .createHash("sha256")
+    .update(lastUserMessage)
+    .digest("hex");
+
+  await createDecisionLog({
+    userId,
+    organizationId,
+    action: decision.action,
+    score: decision.score,
+    reasons: decision.reasons,
+    matchedRuleIds: decision.matchedRules.map((r) => r.code),
+    promptHash,
+    promptPreview: maskPreview(lastUserMessage),
+    promptLength: lastUserMessage.length,
+    latencyMs: Math.round(decision.latencyMs),
+    engineVersion: decision.engineVersion,
+  });
+
+  // ── BLOCK path ───────────────────────────────────────────────────────
+  if (decision.action === "BLOCK") {
+    const encoder = new TextEncoder();
+
+    const blockedChunk: ChatStreamChunk = {
+      type: "blocked",
+      reason: decision.reasons.join("\n"),
+      matchedRules: decision.matchedRules,
+    };
+
+    const doneChunk: ChatStreamChunk = { type: "done" };
+
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(blockedChunk)}\n\n`)
+        );
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(doneChunk)}\n\n`)
+        );
+        controller.close();
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Accel-Buffering": "no",
+      },
+    });
+  }
+
+  // ── ALLOW path — GapGPT streaming (unchanged) ────────────────────────
   const apiKey = process.env.GAPGPT_API_KEY;
   const baseUrl = (
     process.env.GAPGPT_BASE_URL ?? "https://api.gapgpt.app/v1"

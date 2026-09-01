@@ -1,13 +1,6 @@
-import { PrismaClient } from '@prisma/client'
-
-const globalForPrisma = globalThis as unknown as {
-  prisma: PrismaClient | undefined
-}
-
-export const db =
-  globalForPrisma.prisma ??
-  new PrismaClient({
-    log: ['query'],
-  })
-
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+// Barrel export: Prisma client + all repository functions
+export { db } from './db/client';
+export * from './db/types';
+export * from './db/policy-repository';
+export * from './db/log-repository';
+export * from './db/user-repository';

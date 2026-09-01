@@ -3,6 +3,7 @@ import { Vazirmatn } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/toaster";
 import { ThemeProvider } from "@/components/theme-provider";
+import { SessionProvider } from "@/components/auth/session-provider";
 
 const vazirmatn = Vazirmatn({
   subsets: ["arabic", "latin"],
@@ -53,7 +54,7 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          {children}
+          <SessionProvider>{children}</SessionProvider>
           <Toaster />
         </ThemeProvider>
       </body>

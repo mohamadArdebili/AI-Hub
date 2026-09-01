@@ -87,6 +87,9 @@ Thumbs.db
 *.sublime-workspace
 *.sublime-project
 
+# uploaded files
+upload/policy_docs/
+
 # other
 *.zip
 phase*.md

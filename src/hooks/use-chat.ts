@@ -2,6 +2,7 @@
 
 import { useCallback, useRef, useState } from "react";
 import type { ChatMessage, ChatStreamChunk } from "@/lib/chat-types";
+import { authFetch } from "@/lib/api-client";
 
 const SYSTEM_PROMPT =
   "تو یک دستیار هوشمند و حرفه‌ای هستی که به کاربران سازمانی کمک می‌کنی. " +
@@ -83,7 +84,7 @@ export function useChat(): UseChatReturn {
     const assistantId = assistantMsg.id;
 
     try {
-      const res = await fetch("/api/chat", {
+      const res = await authFetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ messages: history }),
@@ -128,6 +129,27 @@ export function useChat(): UseChatReturn {
 
             if (chunk.type === "error") {
               throw new Error(chunk.message ?? "خطای ناشناخته از سمت مدل");
+            }
+
+            // ─── Blocked chunk ───────────────────────────────────────────
+            if (chunk.type === "blocked") {
+              const reasons = chunk.reason
+                ? chunk.reason.split("\n").filter(Boolean)
+                : [];
+              setMessages((prev) =>
+                prev.map((message) =>
+                  message.id === assistantId
+                    ? {
+                        ...message,
+                        pending: false,
+                        blocked: true,
+                        blockedReasons: reasons,
+                        blockedRules: chunk.matchedRules,
+                      }
+                    : message
+                )
+              );
+              continue;
             }
 
             if (chunk.type === "delta" && chunk.content) {

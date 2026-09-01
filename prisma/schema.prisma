@@ -1,9 +1,3 @@
-// This is your Prisma schema file,
-// learn more about it in the docs: https://pris.ly/d/prisma-schema
-
-// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
-// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
-
 generator client {
   provider = "prisma-client-js"
 }
@@ -13,20 +7,196 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
-model User {
-  id        String   @id @default(cuid())
-  email     String   @unique
-  name      String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+// ─── Enums ──────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  ADMIN
+  EMPLOYEE
 }
 
-model Post {
+enum PolicyDocumentStatus {
+  PENDING
+  PROCESSING
+  READY
+  FAILED
+}
+
+enum RuleSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+enum PolicyAction {
+  ALLOW
+  BLOCK
+}
+
+// ─── Organization ───────────────────────────────────────────────────────────
+
+model Organization {
   id        String   @id @default(cuid())
-  title     String
-  content   String?
-  published Boolean  @default(false)
-  authorId  String
+  name      String
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+
+  users           User[]
+  policyDocuments PolicyDocument[]
+  policyRules     PolicyRule[]
+  decisionLogs    PolicyDecisionLog[]
+  chatSessions    ChatSession[]
+}
+
+// ─── User ───────────────────────────────────────────────────────────────────
+
+model User {
+  id             String    @id @default(cuid())
+  email          String    @unique
+  name           String?
+  passwordHash   String
+  role           UserRole  @default(EMPLOYEE)
+  organizationId String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  organization    Organization      @relation(fields: [organizationId], references: [id])
+  policyDocuments PolicyDocument[]
+  decisionLogs    PolicyDecisionLog[]
+  chatSessions    ChatSession[]
+  browserSessions UserSession[]
+}
+
+// ─── Browser Session (compact-cookie auth fallback) ─────────────────────────
+
+model UserSession {
+  id        String   @id // sha256 hash of the opaque session token
+  userId    String
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ─── Policy Document ────────────────────────────────────────────────────────
+
+model PolicyDocument {
+  id               String              @id @default(cuid())
+  organizationId   String
+  filename         String
+  mimeType         String              @default("application/pdf")
+  size             Int
+  storagePath      String
+  uploadedById     String
+  status           PolicyDocumentStatus @default(PENDING)
+  version          Int                 @default(1)
+  isActive         Boolean             @default(false)
+  extractedCharCount Int?
+  errorMessage     String?
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+  uploadedBy  User          @relation(fields: [uploadedById], references: [id])
+  chunks      PolicyChunk[]
+  rules       PolicyRule[]
+}
+
+// ─── Policy Chunk ───────────────────────────────────────────────────────────
+
+model PolicyChunk {
+  id               String  @id @default(cuid())
+  documentId       String
+  index            Int
+  content          String
+  normalizedContent String
+  isRestricted     Boolean @default(false)
+
+  document PolicyDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([documentId])
+}
+
+// ─── Policy Rule ────────────────────────────────────────────────────────────
+
+model PolicyRule {
+  id             String       @id @default(cuid())
+  documentId     String?
+  organizationId String
+  code           String
+  title          String
+  body           String?
+  keywords       String       @default("[]")  // JSON array of strings
+  patterns       String       @default("[]")  // JSON array of regex strings
+  severity       RuleSeverity @default(MEDIUM)
+  category       String?
+  isActive       Boolean      @default(true)
+  isManual       Boolean      @default(false)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  document     PolicyDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  organization Organization    @relation(fields: [organizationId], references: [id])
+  decisionLogs PolicyDecisionLog[] @relation("RuleToLog")
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+// ─── Policy Decision Log ────────────────────────────────────────────────────
+
+model PolicyDecisionLog {
+  id             String       @id @default(cuid())
+  userId         String
+  organizationId String
+  action         PolicyAction
+  score          Float        @default(0)
+  reasons        String       @default("[]")  // JSON array of strings
+  matchedRuleIds String       @default("[]")  // JSON array of rule ids
+  promptHash     String
+  promptPreview  String
+  promptLength   Int
+  latencyMs      Int
+  engineVersion  String
+  createdAt      DateTime     @default(now())
+
+  user         User        @relation(fields: [userId], references: [id])
+  organization  Organization @relation(fields: [organizationId], references: [id])
+  matchedRules PolicyRule[]  @relation("RuleToLog")
+
+  @@index([organizationId])
+  @@index([createdAt])
+}
+
+// ─── Chat Session ───────────────────────────────────────────────────────────
+
+model ChatSession {
+  id             String   @id @default(cuid())
+  userId         String
+  organizationId String
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id])
+  organization Organization @relation(fields: [organizationId], references: [id])
+  messages     ChatMessage[]
+
+  @@index([userId])
+}
+
+// ─── Chat Message (persisted) ───────────────────────────────────────────────
+
+model ChatMessage {
+  id         String   @id @default(cuid())
+  sessionId  String
+  role       String   // "user" | "assistant" | "system"
+  content    String
+  createdAt  DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
 }

@@ -1,30 +1,38 @@
 "use client";
 
-import { ChatHeader } from "@/components/chat/chat-header";
-import { ChatInput } from "@/components/chat/chat-input";
-import { ChatMessages } from "@/components/chat/chat-messages";
-import { ChatSuggestions } from "@/components/chat/chat-suggestions";
-import { useChat } from "@/hooks/use-chat";
+import { useEffect } from "react";
+import { useAuthStore } from "@/stores/auth-store";
+import { LoginView } from "@/components/auth/login-view";
+import { ChatView } from "@/components/app/chat-view";
+import { AdminView } from "@/components/app/admin-view";
+import { Loader2 } from "lucide-react";
 
 export default function Home() {
-  const { messages, isStreaming, sendMessage, stop, reset } = useChat();
-  const hasMessages = messages.length > 0;
+  const { session, isLoading, currentView, initialize } = useAuthStore();
 
-  return (
-    <div className="flex h-[100dvh] flex-col bg-background text-foreground">
-      <ChatHeader onReset={reset} canReset={hasMessages} />
+  useEffect(() => {
+    initialize();
+  }, [initialize]);
 
-      <main className="flex min-h-0 flex-1 flex-col">
-        {hasMessages ? (
-          <ChatMessages messages={messages} />
-        ) : (
-          <div className="flex min-h-0 flex-1 overflow-y-auto">
-            <ChatSuggestions onPick={sendMessage} disabled={isStreaming} />
-          </div>
-        )}
-      </main>
+  // Show loading spinner while checking session
+  if (isLoading) {
+    return (
+      <div className="flex h-[100dvh] items-center justify-center bg-background">
+        <Loader2 className="size-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
 
-      <ChatInput onSend={sendMessage} onStop={stop} isStreaming={isStreaming} />
-    </div>
-  );
+  // Not authenticated → show login
+  if (!session?.user) {
+    return <LoginView />;
+  }
+
+  // Admin panel view
+  if (currentView === "admin") {
+    return <AdminView />;
+  }
+
+  // Default: chat view
+  return <ChatView />;
 }

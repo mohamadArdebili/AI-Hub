@@ -1,6 +1,7 @@
 "use client";
 
-import { RotateCcw, ShieldCheck } from "lucide-react";
+import { useAuthStore } from "@/stores/auth-store";
+import { RotateCcw, ShieldCheck, LogOut, Settings } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { ThemeToggle } from "@/components/chat/theme-toggle";
@@ -11,6 +12,9 @@ interface ChatHeaderProps {
 }
 
 export function ChatHeader({ onReset, canReset }: ChatHeaderProps) {
+  const { session, setView, logout } = useAuthStore();
+  const isAdmin = session?.user?.role === "ADMIN";
+
   return (
     <header className="sticky top-0 z-20 border-b border-border/60 bg-background/80 backdrop-blur-md">
       <div className="mx-auto flex h-14 w-full max-w-3xl items-center justify-between gap-3 px-4">
@@ -24,7 +28,7 @@ export function ChatHeader({ onReset, canReset }: ChatHeaderProps) {
               Demora AI Hub
             </h1>
             <p className="hidden text-[11px] text-muted-foreground sm:block">
-              دستیار امن سازمانی · فاز ۱
+              دستیار امن سازمانی · فاز ۲
             </p>
           </div>
         </div>
@@ -39,7 +43,28 @@ export function ChatHeader({ onReset, canReset }: ChatHeaderProps) {
             title="شروع گفت‌وگوی جدید"
           >
             <RotateCcw className="size-4" />
-            <span className="hidden sm:inline">گفت‌ و گوی جدید</span>
+            <span className="hidden sm:inline">گفت‌وگوی جدید</span>
+          </Button>
+          {isAdmin && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="gap-1.5 text-muted-foreground"
+              onClick={() => setView("admin")}
+              title="پنل مدیریت"
+            >
+              <Settings className="size-4" />
+              <span className="hidden sm:inline">مدیریت</span>
+            </Button>
+          )}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="text-muted-foreground"
+            onClick={logout}
+            title="خروج از حساب"
+          >
+            <LogOut className="size-4" />
           </Button>
           <ThemeToggle />
         </div>
