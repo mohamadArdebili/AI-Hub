@@ -1,6 +1,10 @@
 import { NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
-import { getPolicyRules, createPolicyRule } from '@/lib/db';
+import {
+  getPolicyRules,
+  createPolicyRule,
+  isUniqueConstraintViolation,
+} from '@/lib/db';
 import type { RuleSeverity } from '@prisma/client';
 
 export const runtime = 'nodejs';
@@ -87,6 +91,12 @@ export async function POST(request: NextRequest) {
     }, { status: 201 });
   } catch (err) {
     if (err instanceof Response) return err;
+    if (isUniqueConstraintViolation(err)) {
+      return Response.json(
+        { error: 'کد قاعده تکراری است؛ برای این سازمان قاعده‌ای با همین کد وجود دارد. لطفاً کد دیگری انتخاب کنید' },
+        { status: 409 },
+      );
+    }
     return Response.json({ error: 'خطا در ایجاد قاعده' }, { status: 500 });
   }
 }

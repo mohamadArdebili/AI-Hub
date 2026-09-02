@@ -241,3 +241,23 @@ Stage Summary:
 - Upload pipeline fully fixed: directory creation, filename/DB-id alignment, pdfjs worker bundling, error transparency.
 - Sandbox now has an active READY test doc (English placeholder) — user can upload their real Persian policy PDF and activate it; activation auto-deactivates previous docs.
 - On the user's own machine they must: `npx prisma db push` (UserSession/compact sessions) and restart dev; uploads now work regardless (no pre-existing uploads dir needed).
+
+---
+Task ID: fix-upload-2nd-doc
+Agent: Z.ai Code (main)
+Task: Fix "Unique constraint failed on the fields: (organizationId, code)" when uploading a SECOND policy PDF (policyRule.create P2002)
+
+Work Log:
+- Root cause: extractRulesFromChunks() numbered rules per-document starting at R-001 for EVERY upload, but PolicyRule has @@unique([organizationId, code]). Second document's first rule always collided (seed/manual rules or rules from doc #1).
+- policy-repository.ts: added getMaxRuleCodeNumber(organizationId) (max numeric suffix of existing R-### codes for the org) and isUniqueConstraintViolation(err) (Prisma P2002 check); both exported via barrel.
+- pdf-processor.ts: rule-code allocation now continues after the org's highest existing code (seed R-001..008 → new docs start at R-009); defensive retry loop (up to 100 bumps) on P2002 for concurrent-upload races; removed misleading per-document code generation from extractRulesFromChunks; outer catch maps P2002 to a short Persian errorMessage on the doc record instead of dumping raw Prisma text.
+- /api/admin/rules POST: duplicate code now returns 409 with clear Persian message ("کد قاعده تکراری است…") instead of generic 500.
+- Encountered stale Turbopack HMR binding during verification ("isUniqueConstraintViolation is not a function" with docs stuck PROCESSING) — not a code bug; full dev-server restart with clean .next resolved it.
+- E2E verified (cookieless Bearer, mirrors iframe env): login → upload doc A (READY, rule R-009) → upload identical doc B (READY, rule R-010 — previously FAILED with P2002) → all org codes unique → manual rule duplicate → 409 Persian → cleanup restored 8-seed baseline. 18/18 assertions passed.
+- Browser-verified (agent-browser): admin login → admin panel → documents tab → UI file upload → "در حال پردازش" → "آماده"; rules tab shows R-009 on top; zero console/page errors; cleaned test artifacts afterwards.
+- bun run lint: src/ clean (only pre-existing error in upload/p2_extracted reference folder); vitest 34/34 pass.
+
+Stage Summary:
+- Multiple policy documents per organization now work: extracted rule codes continue org-wide (R-009, R-010, …) instead of restarting at R-001 per document.
+- User action needed on their machine: pull the fix, restart dev server; DELETE the FAILED document row in the admin panel and re-upload the second PDF — it will now process to READY with continued codes.
+- Note: getPolicySnapshot loads ALL isActive rules of the org (not only the active document's) — pre-existing design, unchanged.

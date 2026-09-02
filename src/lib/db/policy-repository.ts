@@ -1,7 +1,7 @@
 import { db } from './client';
 import type { PolicyDocument, PolicyRule } from './types';
 import type { PolicySnapshot } from './types';
-import type { PolicyDocumentStatus, RuleSeverity } from '@prisma/client';
+import { Prisma, type PolicyDocumentStatus, type RuleSeverity } from '@prisma/client';
 
 // ─── Policy Documents ──────────────────────────────────────────────────────
 
@@ -146,6 +146,37 @@ export async function getPolicyRulesByDocument(documentId: string): Promise<Poli
     where: { documentId },
     orderBy: { createdAt: 'desc' },
   });
+}
+
+/**
+ * Rule codes follow the auto-generated `R-###` series and are unique per
+ * organization (@@unique([organizationId, code])). Extracted-rule numbering
+ * must therefore continue AFTER the highest code already stored for the org
+ * (seed rules, manual rules, or rules from previously uploaded documents).
+ * Returns 0 when the organization has no `R-###` rules yet.
+ */
+export async function getMaxRuleCodeNumber(organizationId: string): Promise<number> {
+  const rules = await db.policyRule.findMany({
+    where: { organizationId, code: { startsWith: 'R-' } },
+    select: { code: true },
+  });
+
+  let max = 0;
+  for (const { code } of rules) {
+    const match = /^R-(\d+)$/.exec(code);
+    if (match) {
+      const n = parseInt(match[1], 10);
+      if (Number.isSafeInteger(n) && n > max) max = n;
+    }
+  }
+  return max;
+}
+
+/** True when the error is Prisma's unique-constraint violation (P2002). */
+export function isUniqueConstraintViolation(err: unknown): boolean {
+  return (
+    err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002'
+  );
 }
 
 export async function createPolicyRule(data: {

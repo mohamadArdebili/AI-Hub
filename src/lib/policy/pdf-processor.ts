@@ -7,6 +7,8 @@ import {
   updatePolicyDocumentStatus,
   createPolicyChunks,
   createPolicyRule,
+  getMaxRuleCodeNumber,
+  isUniqueConstraintViolation,
 } from '@/lib/db';
 import { normalizePersian } from '@/lib/policy/normalize';
 import type { RuleSeverity } from '@prisma/client';
@@ -181,7 +183,6 @@ const STOP_WORDS = new Set([
 export function extractRulesFromChunks(
   chunks: Array<{ content: string; index: number }>,
 ): Array<{
-  code: string;
   title: string;
   body: string;
   keywords: string[];
@@ -189,15 +190,12 @@ export function extractRulesFromChunks(
   category: string;
 }> {
   const rules: Array<{
-    code: string;
     title: string;
     body: string;
     keywords: string[];
     severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
     category: string;
   }> = [];
-
-  let ruleCounter = 1;
 
   for (const chunk of chunks) {
     const { content, index } = chunk;
@@ -236,10 +234,8 @@ export function extractRulesFromChunks(
     }
 
     const keywords = extractKeywords(content);
-    const code = `R-${String(ruleCounter).padStart(3, '0')}`;
-    ruleCounter++;
 
-    rules.push({ code, title, body: content, keywords, severity, category });
+    rules.push({ title, body: content, keywords, severity, category });
   }
 
   return rules;
@@ -326,20 +322,43 @@ export async function processPolicyDocument(
       await createPolicyChunks(dbChunks);
     }
 
-    // Save rules to DB
+    // Save rules to DB.
+    // Codes are unique per organization (@@unique([organizationId, code])), so
+    // numbering must continue AFTER the highest existing `R-###` code of the
+    // org (seed rules, manual rules, or rules from previously uploaded
+    // documents) — otherwise the SECOND uploaded document always fails with
+    // "Unique constraint failed on the fields: (organizationId, code)".
+    let nextCodeNumber = (await getMaxRuleCodeNumber(organizationId)) + 1;
+
     for (const rule of extractedRules) {
-      await createPolicyRule({
-        documentId,
-        organizationId,
-        code: rule.code,
-        title: rule.title,
-        body: rule.body,
-        keywords: rule.keywords,
-        patterns: [],
-        severity: rule.severity as RuleSeverity,
-        category: rule.category,
-        isManual: false,
-      });
+      let saved = false;
+      // Defensive retry: if a concurrent upload / manual rule grabs the same
+      // code between our MAX query and the create, bump the number and retry.
+      for (let attempt = 0; attempt < 100 && !saved; attempt++) {
+        const code = `R-${String(nextCodeNumber).padStart(3, '0')}`;
+        try {
+          await createPolicyRule({
+            documentId,
+            organizationId,
+            code,
+            title: rule.title,
+            body: rule.body,
+            keywords: rule.keywords,
+            patterns: [],
+            severity: rule.severity as RuleSeverity,
+            category: rule.category,
+            isManual: false,
+          });
+          saved = true;
+          nextCodeNumber++;
+        } catch (err) {
+          if (!isUniqueConstraintViolation(err)) throw err;
+          nextCodeNumber++;
+        }
+      }
+      if (!saved) {
+        throw new Error('خطا در ذخیره قاعده: کد یکتا برای قاعده قابل تخصیص نیست');
+      }
     }
 
     // Update document status to READY
@@ -350,8 +369,11 @@ export async function processPolicyDocument(
       normalizedText.length,
     );
   } catch (err) {
-    const errorMessage =
-      err instanceof Error ? err.message : 'خطای ناشناخته در پردازش سند';
+    const errorMessage = isUniqueConstraintViolation(err)
+      ? 'خطا در ذخیره قواعد استخراج‌شده: کد قاعده تکراری بود'
+      : err instanceof Error
+        ? err.message
+        : 'خطای ناشناخته در پردازش سند';
     await updatePolicyDocumentStatus(documentId, 'FAILED', errorMessage).catch(() => {
       // If status update fails, we can't do much
     });
