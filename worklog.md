@@ -261,3 +261,20 @@ Stage Summary:
 - Multiple policy documents per organization now work: extracted rule codes continue org-wide (R-009, R-010, …) instead of restarting at R-001 per document.
 - User action needed on their machine: pull the fix, restart dev server; DELETE the FAILED document row in the admin panel and re-upload the second PDF — it will now process to READY with continued codes.
 - Note: getPolicySnapshot loads ALL isActive rules of the org (not only the active document's) — pre-existing design, unchanged.
+
+---
+Task ID: fix-rules-list-overflow
+Agent: Z.ai Code (main)
+Task: Fix rules list overflowing outside its Card box in admin panel Rules Editor when the list grows long ("از باکس میزنه بیرون")
+
+Work Log:
+- Root cause: local shadcn ScrollArea was missing "overflow-hidden" on the Root, and its Viewport uses size-full (h-full) which cannot resolve against a parent with only max-h-[600px] (indefinite height → percentage height becomes auto) → viewport grew to full content height and visually spilled out of the Card; Radix custom scrollbar also never engaged (viewport scrollHeight == clientHeight).
+- Fixed src/components/ui/scroll-area.tsx (shared component): Root base classes now "relative overflow-hidden"; Viewport gained "max-h-[inherit]" so any max-h-* set on the Root is passed down as a real cap on the scrolling viewport (max-height: inherit). Consumers WITHOUT max-h inherit "none" → unchanged behavior.
+- Verified in browser (agent-browser) with 18 rules (content 940px): box capped at exactly 600px, viewport scrollable (clientH 600 vs scrollH 940), root fully inside Card bounds, scroll-to-bottom reveals last row (R-001) inside the box.
+- Regression checks: Logs tab (max-h-[500px]) now also capped correctly (703px content, scrollable, inside card — same latent bug fixed); Documents tab (no max-h) grows freely (130px) as before; short lists stay compact (10 rows → 490px box, no scrollbar).
+- No console/page errors. Lint clean on modified file.
+- Note: sandbox DB contains two user-created manual rules (codes "awd", "شصسشصس") — left untouched (user's live test data); only the 10 temporary overflow-test rules (R-101..R-110) were removed.
+
+Stage Summary:
+- ScrollArea now honors max-h-* on any consumer: long lists scroll INSIDE the box with a Radix scrollbar, short lists keep compact height.
+- Two latent overflow sites fixed at once (rules list 600px, decision-logs list 500px); zero changes needed in admin-view.tsx.
