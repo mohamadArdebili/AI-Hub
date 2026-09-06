@@ -16,12 +16,26 @@ export async function createDecisionLog(entry: DecisionLogEntry): Promise<Policy
       promptLength: entry.promptLength,
       latencyMs: entry.latencyMs,
       engineVersion: entry.engineVersion,
+      // Phase 3 audit fields
+      route: entry.route ?? null,
+      maskCount: entry.maskCount ?? 0,
+      maskLabels: JSON.stringify(entry.maskLabels ?? []),
+      isSensitive: entry.isSensitive ?? null,
+      classifierCategory: entry.classifierCategory ?? null,
+      classifierRisk: entry.classifierRisk ?? null,
+      classifierReason: entry.classifierReason ?? null,
+      classifierLatencyMs: entry.classifierLatencyMs ?? null,
+      sourceIp: entry.sourceIp ?? null,
+      promptTokens: entry.promptTokens ?? null,
+      completionTokens: entry.completionTokens ?? null,
     },
   });
 }
 
 interface DecisionLogFilters {
   action?: PolicyAction;
+  route?: 'EXTERNAL' | 'LOCAL' | 'BLOCKED';
+  classifierRisk?: string;
   userId?: string;
   fromDate?: Date;
   toDate?: Date;
@@ -41,6 +55,12 @@ export async function getDecisionLogs(
 
   if (filters?.action) {
     where.action = filters.action;
+  }
+  if (filters?.route) {
+    where.route = filters.route;
+  }
+  if (filters?.classifierRisk) {
+    where.classifierRisk = filters.classifierRisk;
   }
   if (filters?.userId) {
     where.userId = filters.userId;

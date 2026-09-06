@@ -7,12 +7,14 @@ export type {
   ChatMessage,
   Organization,
   User,
+  MaskDictionary,
 } from '@prisma/client';
 export type {
   PolicyDocumentStatus,
   RuleSeverity,
   PolicyAction,
   UserRole,
+  MaskKind,
 } from '@prisma/client';
 
 // PolicySnapshot: what the engine needs for evaluation
@@ -48,4 +50,16 @@ export interface DecisionLogEntry {
   promptLength: number;
   latencyMs: number;
   engineVersion: string;
+  // ── Phase 3 audit fields ──
+  route?: 'EXTERNAL' | 'LOCAL' | 'BLOCKED' | null;
+  maskCount?: number;
+  maskLabels?: Array<{ label: string; count: number }>;
+  isSensitive?: boolean | null;
+  classifierCategory?: string | null;
+  classifierRisk?: string | null;
+  classifierReason?: string | null;
+  classifierLatencyMs?: number | null;
+  sourceIp?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
 }

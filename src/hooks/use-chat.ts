@@ -152,6 +152,23 @@ export function useChat(): UseChatReturn {
               continue;
             }
 
+            // ─── Meta chunk (Phase 3: routing + mask info) ───────────────
+            if (chunk.type === "meta") {
+              setMessages((prev) =>
+                prev.map((message) =>
+                  message.id === assistantId
+                    ? {
+                        ...message,
+                        route: chunk.route,
+                        maskLabels: chunk.maskLabels,
+                        classifier: chunk.classifier,
+                      }
+                    : message
+                )
+              );
+              continue;
+            }
+
             if (chunk.type === "delta" && chunk.content) {
               setMessages((prev) =>
                 prev.map((message) =>

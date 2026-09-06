@@ -2,11 +2,19 @@
 
 import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
-import { Check, Copy, User, ShieldAlert } from "lucide-react";
+import {
+  Check,
+  Copy,
+  EyeOff,
+  Server,
+  ShieldAlert,
+  User,
+} from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { TypingIndicator } from "@/components/chat/typing-indicator";
+import { MASK_LABELS } from "@/lib/policy/sanitizer";
 import type { ChatMessage as ChatMessageType } from "@/lib/chat-types";
 
 interface ChatMessageProps {
@@ -89,7 +97,13 @@ function ChatMessageBase({ message }: ChatMessageProps) {
         </div>
 
         {!isUser && !isPending && message.content && (
-          <MessageActions text={message.content} errored={Boolean(message.error)} />
+          <>
+            {message.route === "LOCAL" && <LocalRouteBadge />}
+            {message.maskLabels && message.maskLabels.length > 0 && (
+              <MaskNotice findings={message.maskLabels} />
+            )}
+            <MessageActions text={message.content} errored={Boolean(message.error)} />
+          </>
         )}
 
         {message.error && (
@@ -99,6 +113,44 @@ function ChatMessageBase({ message }: ChatMessageProps) {
 
       {isUser && <Avatar role="user" />}
     </div>
+  );
+}
+
+// ─── Phase 3: mask notice & route badge ─────────────────────────────────────
+
+function MaskNotice({
+  findings,
+}: {
+  findings: Array<{ label: string; count: number }>;
+}) {
+  const total = findings.reduce((acc, f) => acc + f.count, 0);
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1.5 rounded-lg border border-amber-500/20 bg-amber-500/5 px-2.5 py-1.5"
+      aria-label={`در پیام شما ${total} مورد داده حساس ماسک شد`}
+    >
+      <EyeOff className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" aria-hidden="true" />
+      <span className="text-[11px] font-medium text-amber-700 dark:text-amber-300">
+        {total} مورد در پیام شما ماسک شد:
+      </span>
+      {findings.map((f) => (
+        <span
+          key={f.label}
+          className="inline-flex items-center rounded-md border border-amber-500/30 bg-background/60 px-1.5 py-0.5 font-mono text-[10px] text-amber-700 dark:text-amber-300"
+        >
+          {MASK_LABELS[f.label as keyof typeof MASK_LABELS] ?? f.label} ×{f.count}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function LocalRouteBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
+      <Server className="size-3" aria-hidden="true" />
+      مسیر: مدل محلی — بدون ارسال به سرویس بیرونی
+    </span>
   );
 }
 

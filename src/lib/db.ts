@@ -4,3 +4,4 @@ export * from './db/types';
 export * from './db/policy-repository';
 export * from './db/log-repository';
 export * from './db/user-repository';
+export * from './db/mask-dictionary-repository';

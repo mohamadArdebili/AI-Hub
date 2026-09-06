@@ -30,6 +30,10 @@ import {
   ShieldAlert,
   ShieldCheck as ShieldOk,
   RefreshCw,
+  BookKey,
+  EyeOff,
+  Server,
+  Globe,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -121,19 +125,56 @@ interface DecisionLog {
   promptLength: number;
   latencyMs: number;
   engineVersion: string;
+  // Phase 3 audit fields
+  route?: "EXTERNAL" | "LOCAL" | "BLOCKED" | null;
+  maskCount?: number;
+  maskLabels?: Array<{ label: string; count: number }>;
+  isSensitive?: boolean | null;
+  classifierCategory?: string | null;
+  classifierRisk?: string | null;
+  classifierReason?: string | null;
+  sourceIp?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+  createdAt: string;
+}
+
+interface MaskDictEntry {
+  id: string;
+  kind: "SENIOR_OFFICER" | "TELCO_HUB_NODE" | "PROPRIETARY_SERVICE";
+  term: string;
+  isActive: boolean;
   createdAt: string;
 }
 
 interface PolicyTestResult {
-  action: "ALLOW" | "BLOCK";
-  reasons: string[];
-  matchedRules: { code: string; title: string; severity: string }[];
-  score: number;
+  pipelineVersion: string;
   latencyMs: number;
-  engineVersion: string;
-  snapshotAvailable: boolean;
-  rulesCount: number;
-  chunksCount: number;
+  sanitize: {
+    maskedText: string;
+    maskCount: number;
+    findings: Array<{ label: string; count: number; labelFa: string }>;
+  };
+  engine: {
+    action: "ALLOW" | "BLOCK";
+    score: number;
+    reasons: string[];
+    matchedRules: { code: string; title: string; severity: string }[];
+    latencyMs: number;
+    engineVersion: string;
+    hasActiveDocument: boolean;
+  };
+  classifier: {
+    isSensitive: boolean;
+    category: string;
+    categoryFa: string;
+    riskLevel: string;
+    reason: string;
+    method: string;
+    latencyMs: number;
+  } | null;
+  route: "EXTERNAL" | "LOCAL" | "BLOCKED";
+  routeFa: string;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -213,6 +254,53 @@ function getSeverityBadge(severity: string) {
   const info = map[severity] || { label: severity, className: "" };
   return <Badge variant="secondary" className={info.className}>{info.label}</Badge>;
 }
+
+function getRouteBadge(route?: string | null) {
+  if (!route) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const map: Record<string, { label: string; className: string }> = {
+    EXTERNAL: {
+      label: "خارجی",
+      className:
+        "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    },
+    LOCAL: {
+      label: "محلی",
+      className:
+        "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    },
+    BLOCKED: {
+      label: "متوقف",
+      className:
+        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    },
+  };
+  const info = map[route] || { label: route, className: "" };
+  return <Badge variant="secondary" className={info.className}>{info.label}</Badge>;
+}
+
+function getRiskBadge(risk?: string | null) {
+  if (!risk) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  return getSeverityBadge(risk.toUpperCase());
+}
+
+const MASK_KIND_LABELS: Record<MaskDictEntry["kind"], string> = {
+  SENIOR_OFFICER: "مدیران ارشد",
+  TELCO_HUB_NODE: "مراکز سوئیچ و هاب",
+  PROPRIETARY_SERVICE: "سرویس‌های انحصاری",
+};
+
+const MASK_KIND_CLASSES: Record<MaskDictEntry["kind"], string> = {
+  SENIOR_OFFICER:
+    "bg-purple-100 text-purple-700 dark:bg-purple-900/30 dark:text-purple-400",
+  TELCO_HUB_NODE:
+    "bg-cyan-100 text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-400",
+  PROPRIETARY_SERVICE:
+    "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
+};
 
 // ─── Inline Toast ───────────────────────────────────────────────────────
 
@@ -1094,6 +1182,8 @@ function DecisionLogsTab() {
 
   // Filters
   const [actionFilter, setActionFilter] = useState<string>("ALL");
+  const [routeFilter, setRouteFilter] = useState<string>("ALL");
+  const [riskFilter, setRiskFilter] = useState<string>("ALL");
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
 
@@ -1106,6 +1196,8 @@ function DecisionLogsTab() {
         pageSize: String(pageSize),
       });
       if (actionFilter !== "ALL") params.set("action", actionFilter);
+      if (routeFilter !== "ALL") params.set("route", routeFilter);
+      if (riskFilter !== "ALL") params.set("risk", riskFilter);
       if (fromDate) params.set("fromDate", fromDate);
       if (toDate) params.set("toDate", toDate);
 
@@ -1122,7 +1214,7 @@ function DecisionLogsTab() {
     } finally {
       setLoading(false);
     }
-  }, [page, actionFilter, fromDate, toDate]);
+  }, [page, actionFilter, routeFilter, riskFilter, fromDate, toDate]);
 
   useEffect(() => {
     fetchLogs();
@@ -1131,7 +1223,7 @@ function DecisionLogsTab() {
   // Reset to page 1 when filters change
   useEffect(() => {
     setPage(1);
-  }, [actionFilter, fromDate, toDate]);
+  }, [actionFilter, routeFilter, riskFilter, fromDate, toDate]);
 
   const totalPages = Math.ceil(total / pageSize);
 
@@ -1153,6 +1245,8 @@ function DecisionLogsTab() {
 
   function clearFilters() {
     setActionFilter("ALL");
+    setRouteFilter("ALL");
+    setRiskFilter("ALL");
     setFromDate("");
     setToDate("");
   }
@@ -1184,13 +1278,52 @@ function DecisionLogsTab() {
                   value={actionFilter}
                   onValueChange={setActionFilter}
                 >
-                  <SelectTrigger className="w-[140px]">
+                  <SelectTrigger className="w-[130px]">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="ALL">همه</SelectItem>
                     <SelectItem value="ALLOW">مجاز</SelectItem>
                     <SelectItem value="BLOCK">مسدود</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">
+                  مسیر
+                </Label>
+                <Select
+                  value={routeFilter}
+                  onValueChange={setRouteFilter}
+                >
+                  <SelectTrigger className="w-[120px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">همه</SelectItem>
+                    <SelectItem value="EXTERNAL">خارجی</SelectItem>
+                    <SelectItem value="LOCAL">محلی</SelectItem>
+                    <SelectItem value="BLOCKED">متوقف</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="grid gap-1.5">
+                <Label className="text-xs text-muted-foreground">
+                  سطح ریسک
+                </Label>
+                <Select
+                  value={riskFilter}
+                  onValueChange={setRiskFilter}
+                >
+                  <SelectTrigger className="w-[120px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="ALL">همه</SelectItem>
+                    <SelectItem value="critical">بحرانی</SelectItem>
+                    <SelectItem value="high">بالا</SelectItem>
+                    <SelectItem value="medium">متوسط</SelectItem>
+                    <SelectItem value="low">پایین</SelectItem>
                   </SelectContent>
                 </Select>
               </div>
@@ -1260,6 +1393,10 @@ function DecisionLogsTab() {
                       کاربر
                     </TableHead>
                     <TableHead>تصمیم</TableHead>
+                    <TableHead>مسیر</TableHead>
+                    <TableHead className="hidden md:table-cell">
+                      ماسک/ریسک
+                    </TableHead>
                     <TableHead className="hidden sm:table-cell">
                       امتیاز
                     </TableHead>
@@ -1299,6 +1436,18 @@ function DecisionLogsTab() {
                             مسدود
                           </Badge>
                         )}
+                      </TableCell>
+                      <TableCell>{getRouteBadge(log.route)}</TableCell>
+                      <TableCell className="hidden md:table-cell">
+                        <div className="flex flex-col items-start gap-1">
+                          {getRiskBadge(log.classifierRisk)}
+                          {Boolean(log.maskCount) && (
+                            <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
+                              <EyeOff className="size-3" />
+                              {log.maskCount} مورد ماسک
+                            </span>
+                          )}
+                        </div>
                       </TableCell>
                       <TableCell className="hidden sm:table-cell font-mono text-xs">
                         {log.score.toFixed(2)}
@@ -1453,25 +1602,39 @@ function PolicyTesterTab() {
       {/* Results */}
       {result && (
         <div className="space-y-4">
-          {/* Decision Card */}
+          {/* Final route */}
           <Card
             className={
-              result.action === "ALLOW"
-                ? "border-green-200 bg-green-50/50 dark:border-green-800 dark:bg-green-950/20"
-                : "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20"
+              result.route === "EXTERNAL"
+                ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20"
+                : result.route === "LOCAL"
+                  ? "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20"
+                  : "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20"
             }
           >
             <CardContent className="py-4">
               <div className="flex items-center gap-3">
-                {result.action === "ALLOW" ? (
+                {result.route === "EXTERNAL" ? (
                   <>
-                    <ShieldOk className="size-8 text-green-600 dark:text-green-400" />
+                    <Globe className="size-8 text-emerald-600 dark:text-emerald-400" />
                     <div>
-                      <p className="text-lg font-bold text-green-700 dark:text-green-400">
-                        مجاز
+                      <p className="text-lg font-bold text-emerald-700 dark:text-emerald-400">
+                        مسیر: مدل خارجی
                       </p>
-                      <p className="text-sm text-green-600/80 dark:text-green-500/80">
-                        این پرامپت مجاز تشخیص داده شد
+                      <p className="text-sm text-emerald-600/80 dark:text-emerald-500/80">
+                        نسخه ماسک‌شدهٔ پرامپت به سرویس بیرونی ارسال می‌شود
+                      </p>
+                    </div>
+                  </>
+                ) : result.route === "LOCAL" ? (
+                  <>
+                    <Server className="size-8 text-amber-600 dark:text-amber-400" />
+                    <div>
+                      <p className="text-lg font-bold text-amber-700 dark:text-amber-400">
+                        مسیر: مدل محلی
+                      </p>
+                      <p className="text-sm text-amber-600/80 dark:text-amber-500/80">
+                        داده حساس شناسایی شد — بدون ارسال به سرویس بیرونی
                       </p>
                     </div>
                   </>
@@ -1480,10 +1643,10 @@ function PolicyTesterTab() {
                     <ShieldAlert className="size-8 text-red-600 dark:text-red-400" />
                     <div>
                       <p className="text-lg font-bold text-red-700 dark:text-red-400">
-                        مسدود
+                        متوقف شد
                       </p>
                       <p className="text-sm text-red-600/80 dark:text-red-500/80">
-                        این پرامپت مسدود شد
+                        تخلف بحرانی از سیاست امنیتی — درخواست ارسال نشد
                       </p>
                     </div>
                   </>
@@ -1492,111 +1655,409 @@ function PolicyTesterTab() {
             </CardContent>
           </Card>
 
-          {/* Stats */}
-          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Card>
-              <CardContent className="flex flex-col items-center py-3">
-                <Zap className="mb-1 size-4 text-muted-foreground" />
-                <span className="text-lg font-bold">{result.latencyMs}ms</span>
-                <span className="text-[11px] text-muted-foreground">
-                  تأخیر
-                </span>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="flex flex-col items-center py-3">
-                <ShieldCheck className="mb-1 size-4 text-muted-foreground" />
-                <span className="text-lg font-bold">{result.score.toFixed(2)}</span>
-                <span className="text-[11px] text-muted-foreground">
-                  امتیاز
-                </span>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="flex flex-col items-center py-3">
-                <ShieldCheck className="mb-1 size-4 text-muted-foreground" />
-                <span className="text-lg font-bold">{result.rulesCount}</span>
-                <span className="text-[11px] text-muted-foreground">
-                  تعداد قواعد
-                </span>
-              </CardContent>
-            </Card>
-            <Card>
-              <CardContent className="flex flex-col items-center py-3">
-                <FileText className="mb-1 size-4 text-muted-foreground" />
-                <span className="text-lg font-bold">{result.chunksCount}</span>
-                <span className="text-[11px] text-muted-foreground">
-                  تعداد قطعات
-                </span>
-              </CardContent>
-            </Card>
-          </div>
+          {/* Pipeline layer 1: Sanitizer */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <EyeOff className="size-4" />
+                لایه ۱ — ماسک‌گذاری (Sanitizer)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              {result.sanitize.maskCount === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  موردی برای ماسک‌گذاری یافت نشد
+                </p>
+              ) : (
+                <div className="flex flex-wrap gap-1.5">
+                  {result.sanitize.findings.map((f) => (
+                    <Badge
+                      key={f.label}
+                      variant="secondary"
+                      className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                    >
+                      {f.labelFa} ×{f.count}
+                    </Badge>
+                  ))}
+                </div>
+              )}
+              <div className="rounded-md border bg-muted/40 p-3">
+                <p className="mb-1 text-[11px] text-muted-foreground">
+                  متن ماسک‌شده (همین نسخه به مدل می‌رود):
+                </p>
+                <p
+                  className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed"
+                  dir="rtl"
+                >
+                  {result.sanitize.maskedText}
+                </p>
+              </div>
+            </CardContent>
+          </Card>
 
-          {/* Snapshot status */}
-          {!result.snapshotAvailable && (
-            <Alert>
-              <AlertCircle className="size-4" />
-              <AlertTitle>اسناد فعال موجود نیست</AlertTitle>
-              <AlertDescription>
-                هیچ سند سیاست فعال‌شده‌ای وجود ندارد. لطفاً ابتدا یک سند
-                آپلود و فعال کنید.
-              </AlertDescription>
-            </Alert>
-          )}
-
-          {/* Reasons (if BLOCK) */}
-          {result.action === "BLOCK" && result.reasons.length > 0 && (
-            <Card>
-              <CardHeader className="pb-2">
-                <CardTitle className="text-sm">دلایل مسدودسازی</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <ul className="space-y-2">
-                  {result.reasons.map((reason, i) => (
+          {/* Pipeline layer 2: Engine */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <ShieldCheck className="size-4" />
+                لایه ۲ — موتور قواعد (فاز ۲)
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              <div className="flex items-center gap-2">
+                {result.engine.action === "ALLOW" ? (
+                  <Badge
+                    variant="secondary"
+                    className="bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
+                  >
+                    عبور
+                  </Badge>
+                ) : (
+                  <Badge
+                    variant="secondary"
+                    className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                  >
+                    مسدود
+                  </Badge>
+                )}
+                <span className="text-xs text-muted-foreground">
+                  امتیاز: {result.engine.score.toFixed(2)} · {result.engine.latencyMs}ms
+                </span>
+              </div>
+              {!result.engine.hasActiveDocument && (
+                <p className="text-xs text-orange-600 dark:text-orange-400">
+                  هیچ سند سیاست فعالی وجود ندارد (حالت fail-closed)
+                </p>
+              )}
+              {result.engine.reasons.length > 0 && (
+                <ul className="space-y-1">
+                  {result.engine.reasons.map((reason, i) => (
                     <li
                       key={i}
-                      className="flex items-start gap-2 text-sm"
+                      className="flex items-start gap-2 text-xs text-muted-foreground"
                     >
-                      <span className="mt-0.5 size-1.5 shrink-0 rounded-full bg-red-500" />
+                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-red-400" />
                       {reason}
                     </li>
                   ))}
                 </ul>
-              </CardContent>
-            </Card>
-          )}
+              )}
+            </CardContent>
+          </Card>
 
-          {/* Matched Rules (if BLOCK) */}
-          {result.action === "BLOCK" &&
-            result.matchedRules.length > 0 && (
-              <Card>
-                <CardHeader className="pb-2">
-                  <CardTitle className="text-sm">
-                    قواعد تطبیق‌یافته
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="space-y-2">
-                    {result.matchedRules.map((rule, i) => (
-                      <div
-                        key={i}
-                        className="flex items-center gap-2 rounded-md border p-2"
-                      >
-                        <span className="font-mono text-xs text-muted-foreground">
-                          {rule.code}
-                        </span>
-                        <span className="text-sm">{rule.title}</span>
-                        <div className="mr-auto">
-                          {getSeverityBadge(rule.severity)}
-                        </div>
-                      </div>
-                    ))}
+          {/* Pipeline layer 3: Classifier */}
+          <Card>
+            <CardHeader className="pb-2">
+              <CardTitle className="flex items-center gap-2 text-sm">
+                <Zap className="size-4" />
+                لایه ۳ — طبقه‌بند هوشمند
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-2">
+              {result.classifier ? (
+                <>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {getRiskBadge(result.classifier.riskLevel)}
+                    <Badge variant="outline">{result.classifier.categoryFa}</Badge>
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      {result.classifier.method === "llm" ? "LLM" : "هیوریستیک"}
+                    </Badge>
+                    <span className="text-xs text-muted-foreground">
+                      {result.classifier.latencyMs}ms
+                    </span>
                   </div>
-                </CardContent>
-              </Card>
-            )}
+                  <p className="text-xs leading-relaxed text-muted-foreground">
+                    {result.classifier.reason}
+                  </p>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  اجرا نشد (موتور قواعد پرامپت را مسدود کرد)
+                </p>
+              )}
+            </CardContent>
+          </Card>
+
+          <p className="text-center text-xs text-muted-foreground">
+            زمان کل پایپ‌لاین: {result.latencyMs}ms · نسخه: {result.pipelineVersion}
+          </p>
         </div>
       )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Tab 5: Mask Dictionary (Phase 3)
+// ═══════════════════════════════════════════════════════════════════════════
+
+function MaskDictionaryTab() {
+  const [entries, setEntries] = useState<MaskDictEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
+  const [newKind, setNewKind] = useState<MaskDictEntry["kind"]>("SENIOR_OFFICER");
+  const [newTerm, setNewTerm] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [kindFilter, setKindFilter] = useState<string>("ALL");
+
+  const fetchEntries = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const res = await authFetch("/api/admin/mask-dictionary");
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در دریافت دیکشنری");
+      }
+      setEntries(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchEntries();
+  }, [fetchEntries]);
+
+  async function handleAdd() {
+    if (!newTerm.trim()) return;
+    try {
+      setAdding(true);
+      setError(null);
+      const res = await authFetch("/api/admin/mask-dictionary", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ kind: newKind, term: newTerm.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "خطا در افزودن عبارت");
+      setEntries((prev) =>
+        [...prev, data].sort(
+          (a, b) => a.kind.localeCompare(b.kind) || a.term.localeCompare(b.term)
+        )
+      );
+      setNewTerm("");
+      setSuccess("عبارت با موفقیت اضافه شد");
+      setTimeout(() => setSuccess(null), 2500);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  async function handleToggle(entry: MaskDictEntry) {
+    try {
+      setError(null);
+      const res = await authFetch(`/api/admin/mask-dictionary/${entry.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ isActive: !entry.isActive }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در تغییر وضعیت");
+      }
+      setEntries((prev) =>
+        prev.map((e) => (e.id === entry.id ? { ...e, isActive: !e.isActive } : e))
+      );
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    }
+  }
+
+  async function handleDelete(id: string) {
+    try {
+      setError(null);
+      const res = await authFetch(`/api/admin/mask-dictionary/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در حذف عبارت");
+      }
+      setEntries((prev) => prev.filter((e) => e.id !== id));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    }
+  }
+
+  const filtered =
+    kindFilter === "ALL" ? entries : entries.filter((e) => e.kind === kindFilter);
+
+  return (
+    <div className="space-y-6">
+      {error && (
+        <ToastMessage message={error} type="error" onDismiss={() => setError(null)} />
+      )}
+      {success && (
+        <ToastMessage message={success} type="success" onDismiss={() => setSuccess(null)} />
+      )}
+
+      <Alert>
+        <BookKey className="size-4" />
+        <AlertTitle>دیکشنری ماسک‌گذاری</AlertTitle>
+        <AlertDescription>
+          عبارت‌های این فهرست پیش از ارسال هر پرامپت به مدل، با برچسب امن جایگزین
+          می‌شوند (نظیر [SENIOR_OFFICER]). الگوهای قطعی مثل شماره تلفن، کد ملی و IP
+          داخلی به‌صورت خودکار ماسک می‌شوند و نیازی به ثبت در این فهرست ندارند.
+        </AlertDescription>
+      </Alert>
+
+      {/* Add form */}
+      <Card>
+        <CardContent className="py-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <div className="grid flex-1 gap-1.5">
+              <Label htmlFor="mask-kind">نوع دیکشنری</Label>
+              <Select
+                value={newKind}
+                onValueChange={(v) => setNewKind(v as MaskDictEntry["kind"])}
+              >
+                <SelectTrigger id="mask-kind">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(MASK_KIND_LABELS) as Array<MaskDictEntry["kind"]>).map(
+                    (k) => (
+                      <SelectItem key={k} value={k}>
+                        {MASK_KIND_LABELS[k]}
+                      </SelectItem>
+                    )
+                  )}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid flex-[2] gap-1.5">
+              <Label htmlFor="mask-term">عبارت</Label>
+              <Input
+                id="mask-term"
+                placeholder="مثلاً: مرکز تلفن بین‌الملل"
+                value={newTerm}
+                onChange={(e) => setNewTerm(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") handleAdd();
+                }}
+              />
+            </div>
+            <Button
+              onClick={handleAdd}
+              disabled={adding || newTerm.trim().length < 2}
+              className="gap-1.5"
+            >
+              {adding ? <Spinner /> : <Plus className="size-4" />}
+              افزودن
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Kind filter */}
+      <div className="flex items-center gap-2">
+        <Filter className="size-4 text-muted-foreground" />
+        <Select value={kindFilter} onValueChange={setKindFilter}>
+          <SelectTrigger className="w-[200px]">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="ALL">همهٔ دیکشنری‌ها</SelectItem>
+            {(Object.keys(MASK_KIND_LABELS) as Array<MaskDictEntry["kind"]>).map((k) => (
+              <SelectItem key={k} value={k}>
+                {MASK_KIND_LABELS[k]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <span className="text-xs text-muted-foreground">{filtered.length} عبارت</span>
+      </div>
+
+      {/* Terms table */}
+      <Card>
+        <CardContent className="p-0">
+          {loading ? (
+            <div className="space-y-3 p-4">
+              {[1, 2, 3, 4].map((i) => (
+                <Skeleton key={i} className="h-10 w-full" />
+              ))}
+            </div>
+          ) : filtered.length === 0 ? (
+            <div className="py-12 text-center text-muted-foreground">
+              <BookKey className="mx-auto mb-3 size-10 opacity-30" />
+              <p className="text-sm">هنوز عبارتی در این دیکشنری ثبت نشده است</p>
+            </div>
+          ) : (
+            <ScrollArea className="max-h-[480px]">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>عبارت</TableHead>
+                    <TableHead className="hidden sm:table-cell">دیکشنری</TableHead>
+                    <TableHead>فعال</TableHead>
+                    <TableHead>عملیات</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {filtered.map((entry) => (
+                    <TableRow key={entry.id}>
+                      <TableCell className="max-w-[280px] font-medium">
+                        {entry.term}
+                      </TableCell>
+                      <TableCell className="hidden sm:table-cell">
+                        <Badge
+                          variant="secondary"
+                          className={MASK_KIND_CLASSES[entry.kind]}
+                        >
+                          {MASK_KIND_LABELS[entry.kind]}
+                        </Badge>
+                      </TableCell>
+                      <TableCell>
+                        <Switch
+                          checked={entry.isActive}
+                          onCheckedChange={() => handleToggle(entry)}
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-7 gap-1 text-xs text-destructive hover:text-destructive"
+                            >
+                              <Trash2 className="size-3" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent dir="rtl">
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>حذف عبارت</AlertDialogTitle>
+                              <AlertDialogDescription>
+                                آیا از حذف «{entry.term}» مطمئن هستید؟ این عمل قابل
+                                بازگشت نیست.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>انصراف</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() => handleDelete(entry.id)}
+                                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                              >
+                                حذف
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            </ScrollArea>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }
@@ -1632,6 +2093,11 @@ export function AdminView() {
               <span className="hidden sm:inline">آزمایشگاه سیاست</span>
               <span className="sm:hidden">آزمایش</span>
             </TabsTrigger>
+            <TabsTrigger value="dictionary" className="gap-1.5">
+              <BookKey className="size-4" />
+              <span className="hidden sm:inline">دیکشنری ماسک</span>
+              <span className="sm:hidden">دیکشنری</span>
+            </TabsTrigger>
           </TabsList>
 
           <TabsContent value="policy">
@@ -1645,6 +2111,9 @@ export function AdminView() {
           </TabsContent>
           <TabsContent value="tester">
             <PolicyTesterTab />
+          </TabsContent>
+          <TabsContent value="dictionary">
+            <MaskDictionaryTab />
           </TabsContent>
         </Tabs>
       </main>

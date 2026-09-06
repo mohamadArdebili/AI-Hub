@@ -278,3 +278,29 @@ Work Log:
 Stage Summary:
 - ScrollArea now honors max-h-* on any consumer: long lists scroll INSIDE the box with a Radix scrollbar, short lists keep compact height.
 - Two latent overflow sites fixed at once (rules list 600px, decision-logs list 500px); zero changes needed in admin-view.tsx.
+
+---
+Task ID: phase3-dlp-router
+Agent: Z.ai Code (main)
+Task: Phase 3 — Smart Data DLP & Prompt Routing (لایه هوشمند تشخیص داده‌های حساس و مسیریابی هوشمند پرامپت)
+
+User decisions: GapGPT stays external provider; LOCAL answering deferred to a later phase (placeholder response for sensitive prompts); classifier runs on ALL prompts, ambiguity → local side; pipeline order Sanitizer → phase-2 rule engine → Classifier → Router; dictionaries = DB + admin tab (seeded from the TCI sample doc); violation-alert delivery (کارتابل فاوا) deferred — critical blocks are logged only; audit = extend existing PolicyDecisionLog; user IS told masking happened.
+
+Work Log:
+- Prisma: MaskKind enum + MaskDictionary model (unique org+kind+term, cascade); PolicyDecisionLog +12 audit fields (route, maskCount, maskLabels, isSensitive, classifierCategory/Risk/Reason/LatencyMs, sourceIp, promptTokens, completionTokens); db push OK; seed.ts + seedMaskDictionary (مرکز نصر، مرکز انقلاب، مدیرعامل، هیئت مدیره، معاون، پرتال مخابرات من، سامانه بیلینگ متمرکز) — deliberately NOT تانوما (approved marketing use).
+- src/lib/policy/sanitizer.ts: deterministic masking — Iranian mobiles (09x/+98/0098/98, Persian+Arabic digits), landlines with all 23 provincial area codes, RFC1918 private IPs, Iranian national-ID with mod-11 checksum (random 10-digit runs survive), dictionary terms with ی/ك/ZWNJ/space variants (longest-first). Returns maskedText + aggregated findings.
+- src/lib/policy/classifier.ts: heuristicScan (weighted keyword specs; jailbreak→critical w10, CDR/board/customer-analysis w5-6, source/infra/tender w3-5) + LLM classifier (Persian system prompt, strict JSON {is_sensitive,category,risk_level,reason}, fenced-JSON-tolerant parser, 8s timeout via CLASSIFIER_TIMEOUT_MS) merged so heuristic can only RAISE risk; decideRoute: critical→BLOCKED, medium/high→LOCAL, low→EXTERNAL. LLM unavailable → heuristic-only (fail-safe to local side).
+- src/lib/llm/client.ts: provider abstraction gapgpt (streaming SSE + non-stream) | zai dev fallback (no key needed in sandbox); llmStreamChat/llmComplete/estimateTokens.
+- /api/chat rewritten as 4-layer pipeline: sanitize (dictionaries from DB) → phase-2 evaluate (unchanged semantics, on original text) → classify → route. BLOCKED: engine path unchanged + classifier-critical path with Persian violation message (کارتابل wording). LOCAL: transparent placeholder notice (LOCAL answering = next phase, nothing leaves the org). EXTERNAL: masked last-user-message substituted into history; meta chunk first; audit log written post-stream with token estimates. promptPreview now stores the MASKED preview. sourceIp from x-forwarded-for.
+- chat-types.ts: ChatRoute/MaskFindingDto/ClassifierDto + "meta" chunk type + ChatMessage fields (route/maskLabels/classifier). use-chat handles meta. chat-message.tsx: MaskNotice amber badge row («N مورد ماسک شد») + LocalRouteBadge.
+- Admin APIs: /api/admin/mask-dictionary (GET/POST, 409 Persian on dup) + /[id] (PATCH/DELETE); /api/admin/logs returns phase-3 fields + route/risk filters (log-repository filters extended); /api/admin/policy/test RECREATED (it was missing from disk) as full pipeline dry-run: sanitize→engine→classifier→route with layered payload (no model answering).
+- admin-view.tsx: new tab 5 «دیکشنری ماسک» (add form w/ kind select, kind filter, active toggle, delete w/ AlertDialog); logs tab + route/risk filter selects + مسیر/ماسک-ریسک columns (getRouteBadge/getRiskBadge); tester tab rewritten to show 3 pipeline layers (findings badges, masked text block, engine pass/block+reasons, classifier risk/category/method) + final route card (EXTERNAL emerald / LOCAL amber / BLOCKED red).
+- Fixed stale export issue: src/lib/db.ts (legacy barrel FILE that shadows db/index.ts) was missing mask-dictionary-repository re-export → 500 on /api/chat until added + dev restart.
+- Tests: __tests__/sanitizer.test.ts (28 tests: phones Persian/Latin, landline area codes, RFC1918 vs public IPs, national-ID checksum valid/invalid, dictionary variants incl Arabic yeh/kaf + ZWNJ, heuristic scan, JSON parsing, decideRoute mapping). Full suite 62/62 green. Fixed during TDD: digit prefixes needed Persian classes (digitSeq), heuristic per-spec score flat+cap (was inflating high→critical).
+- Browser E2E (agent-browser, cookieless Bearer env): chat phone message → EXTERNAL answer + «1 مورد ماسک شد: تلفن همراه ×1» badge (model never saw raw number); «ریز مکالمات مشترکین» → BLOCKED critical violation card (exact سند semantics: CDR=توقف+ثبت); budget prompt → engine rule BLOCK (layer-2 intact); dictionary tab add (verified in DB) + delete via dialog; logs tab shows تصمیم/مسیر/ماسک-ریسك columns; tester dry-run shows all 3 layers + masked text + final route; zero console errors; lint clean (src/).
+
+Stage Summary:
+- Phase 3 complete: no identifier (phone/NID/IP/officer/hub/proprietary term) can reach the external provider unmasked; sensitive prompts never leave the org (LOCAL placeholder until local-LLM phase); critical/jailbreak attempts are halted + audit-logged.
+- GapGPT without key in sandbox → zai dev fallback answers EXTERNAL traffic (swap by setting GAPGPT_API_KEY).
+- Deferred (user-approved): LOCAL model answering (next phase), violation-alert delivery/webhook (only logging now).
+- User machine checklist: git pull → npx prisma db push → (optional) bun run seed → restart dev; GAPGPT_API_KEY optional (dev fallback otherwise).

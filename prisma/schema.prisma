@@ -33,6 +33,12 @@ enum PolicyAction {
   BLOCK
 }
 
+enum MaskKind {
+  SENIOR_OFFICER
+  TELCO_HUB_NODE
+  PROPRIETARY_SERVICE
+}
+
 // ─── Organization ───────────────────────────────────────────────────────────
 
 model Organization {
@@ -46,6 +52,7 @@ model Organization {
   policyRules     PolicyRule[]
   decisionLogs    PolicyDecisionLog[]
   chatSessions    ChatSession[]
+  maskDictionary  MaskDictionary[]
 }
 
 // ─── User ───────────────────────────────────────────────────────────────────
@@ -146,6 +153,23 @@ model PolicyRule {
   @@index([organizationId])
 }
 
+// ─── Mask Dictionary (Sanitizer dictionaries, Phase 3) ─────────────────────
+
+model MaskDictionary {
+  id             String   @id @default(cuid())
+  organizationId String
+  kind           MaskKind
+  term           String
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, kind, term])
+  @@index([organizationId, kind])
+}
+
 // ─── Policy Decision Log ────────────────────────────────────────────────────
 
 model PolicyDecisionLog {
@@ -162,6 +186,19 @@ model PolicyDecisionLog {
   latencyMs      Int
   engineVersion  String
   createdAt      DateTime     @default(now())
+
+  // ── Phase 3: Smart DLP & Prompt Routing audit fields ──
+  route               String?  // EXTERNAL | LOCAL | BLOCKED (null = legacy rows / engine-only)
+  maskCount           Int      @default(0)
+  maskLabels          String   @default("[]") // JSON array of {label, count}
+  isSensitive         Boolean?
+  classifierCategory  String?
+  classifierRisk      String?  // low | medium | high | critical
+  classifierReason    String?
+  classifierLatencyMs Int?
+  sourceIp            String?
+  promptTokens        Int?
+  completionTokens    Int?
 
   user         User        @relation(fields: [userId], references: [id])
   organization  Organization @relation(fields: [organizationId], references: [id])

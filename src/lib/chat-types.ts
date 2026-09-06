@@ -2,6 +2,22 @@
 
 export type ChatRole = "user" | "assistant" | "system";
 
+/** Phase 3 routing decision (Smart DLP & Prompt Routing). */
+export type ChatRoute = "EXTERNAL" | "LOCAL" | "BLOCKED";
+
+export interface MaskFindingDto {
+  label: string;
+  count: number;
+}
+
+export interface ClassifierDto {
+  isSensitive: boolean;
+  category: string;
+  riskLevel: string;
+  reason: string;
+  method: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -17,6 +33,10 @@ export interface ChatMessage {
   blockedReasons?: string[];
   /** Rules that triggered the block. */
   blockedRules?: Array<{ code: string; title: string; severity: string }>;
+  /** Phase 3: routing + mask metadata attached via the "meta" chunk. */
+  route?: ChatRoute;
+  maskLabels?: MaskFindingDto[];
+  classifier?: ClassifierDto;
 }
 
 export interface ChatApiRequest {
@@ -28,7 +48,7 @@ export interface ChatApiRequest {
  * Each chunk carries an incremental piece of the assistant reply.
  */
 export interface ChatStreamChunk {
-  type: "delta" | "done" | "error" | "blocked";
+  type: "delta" | "done" | "error" | "blocked" | "meta";
   /** Partial text to append (for "delta"). */
   content?: string;
   /** Full final message id (for "done"). */
@@ -39,4 +59,10 @@ export interface ChatStreamChunk {
   reason?: string;
   /** Matched rules (for "blocked"). */
   matchedRules?: Array<{ code: string; title: string; severity: string }>;
+  /** Phase 3 routing decision (for "meta"). */
+  route?: ChatRoute;
+  /** Phase 3 masked findings (for "meta"). */
+  maskLabels?: MaskFindingDto[];
+  /** Phase 3 classifier verdict (for "meta"). */
+  classifier?: ClassifierDto;
 }

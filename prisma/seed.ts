@@ -186,7 +186,45 @@ async function main() {
     }
   }
 
+  // ── 5. Mask dictionary (Phase 3) ─────────────────────────────────────
+  await seedMaskDictionary(org.id);
+
   console.log("\n✅ عملیات seed با موفقیت انجام شد.");
+}
+
+// ─── Mask dictionary seed (Phase 3 — from the reference policy document) ────
+
+const SEED_MASK_DICTIONARY: Array<{ kind: string; term: string }> = [
+  // مراکز سوئیچ و هاب‌های اصلی (نمونه‌های سند سیاست)
+  { kind: "TELCO_HUB_NODE", term: "مرکز نصر" },
+  { kind: "TELCO_HUB_NODE", term: "مرکز انقلاب" },
+  // مدیران ارشد و معاونین (عناوین نمونه — ادمین اسامی واقعی را اضافه می‌کند)
+  { kind: "SENIOR_OFFICER", term: "مدیرعامل" },
+  { kind: "SENIOR_OFFICER", term: "هیئت مدیره" },
+  { kind: "SENIOR_OFFICER", term: "معاون" },
+  // سرویس‌ها و سامانه‌های انحصاری سازمان (تانوما/خدمات عمومی عمداً درج نشده‌اند چون کاربرد بازاریابی آن‌ها مجاز است)
+  { kind: "PROPRIETARY_SERVICE", term: "پرتال مخابرات من" },
+  { kind: "PROPRIETARY_SERVICE", term: "سامانه بیلینگ متمرکز" },
+];
+
+async function seedMaskDictionary(organizationId: string) {
+  console.log("  📚 درج دیکشنری ماسک‌گذاری ...");
+  for (const entry of SEED_MASK_DICTIONARY) {
+    const existing = await db.maskDictionary.findFirst({
+      where: { organizationId, kind: entry.kind as never, term: entry.term },
+    });
+    if (!existing) {
+      await db.maskDictionary.create({
+        data: {
+          organizationId,
+          kind: entry.kind as never,
+          term: entry.term,
+          isActive: true,
+        },
+      });
+      console.log(`    ✅ ${entry.kind}: ${entry.term}`);
+    }
+  }
 }
 
 main()
