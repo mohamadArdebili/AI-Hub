@@ -304,3 +304,20 @@ Stage Summary:
 - GapGPT without key in sandbox → zai dev fallback answers EXTERNAL traffic (swap by setting GAPGPT_API_KEY).
 - Deferred (user-approved): LOCAL model answering (next phase), violation-alert delivery/webhook (only logging now).
 - User machine checklist: git pull → npx prisma db push → (optional) bun run seed → restart dev; GAPGPT_API_KEY optional (dev fallback otherwise).
+
+---
+Task ID: fix-policy-tester-404
+Agent: Z.ai Code (main)
+Task: Fix "خطا در آزمایش" in admin panel Policy Testing Lab (آزمایشگاه سیاست)
+
+Work Log:
+- Root cause: src/app/api/admin/policy/test/route.ts was MISSING from disk (worklog phase3-dlp-router says it was recreated, but the file was absent — likely lost in a sync/restore). Frontend POST /api/admin/policy/test → 404 → generic "خطا در آزمایش".
+- Rebuilt the route as a full pipeline dry-run mirroring /api/chat exactly: Layer 1 sanitizePrompt(getActiveMaskTerms) → Layer 2 evaluate(getPolicySnapshot, original text) → Layer 3 classifyPrompt(masked text, skipped when engine blocks) → Layer 4 decideRoute (engine BLOCK / critical→BLOCKED / high|medium→LOCAL / low→EXTERNAL). No model answering, no audit-log writes (dry-run tool).
+- Response shape matches admin-view.tsx PolicyTestResult 1:1 (pipelineVersion, latencyMs, sanitize{maskedText,maskCount,findings[label,count,labelFa]}, engine{action,score,reasons,matchedRules,latencyMs,engineVersion,hasActiveDocument}, classifier|null{isSensitive,category,categoryFa,riskLevel,reason,method,latencyMs}, route, routeFa). Validation: empty → 400, >8000 chars → 400, non-admin → requireAdmin 401/403.
+- Verified via curl (Bearer token, cookieless): neutral → EXTERNAL (classifier llm, low); phone prompt → MASKED_MOBILE ×1 + masked text + EXTERNAL; CDR prompt → engine ALLOW but classifier critical → BLOCKED; صورتجلسه/بودجه prompt → engine BLOCK R-004+R-007+BEHAVIORAL (legit rule block, classifier skipped → null).
+- Browser-verified (agent-browser): admin login → مدیریت → tab آزمایشگاه سیاست → prompt + آزمایش → EXTERNAL emerald card «مسیر: مدل خارجی» + mask badge «تلفن همراه» + masked text + layer 2 «عبور» + layer 3 + pipeline version/latency; jailbreak prompt → red card «متوقف شد / تخلف بحرانی». Zero console errors.
+- Lint: only pre-existing error in upload/p2_extracted reference folder; project source clean. dev.log: no errors from the new route.
+
+Stage Summary:
+- Policy Testing Lab fully functional again: shows all 3 pipeline layers + final route card exactly as designed in phase3-dlp-router.
+- File restored: src/app/api/admin/policy/test/route.ts (169 lines).
