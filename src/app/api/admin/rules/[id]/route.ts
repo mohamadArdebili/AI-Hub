@@ -1,7 +1,12 @@
 import { NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
-import { updatePolicyRule, deletePolicyRule } from '@/lib/db';
-import type { RuleSeverity } from '@prisma/client';
+import {
+  updatePolicyRule,
+  deletePolicyRule,
+  db,
+  createPolicyAuditLog,
+} from '@/lib/db';
+import type { RuleSeverity, RuleStatus } from '@prisma/client';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -17,6 +22,11 @@ export async function PATCH(
     const session = await requireAdmin(request);
     const { id } = await params;
     const body = await request.json();
+
+    // ── Sensitive-Data Layer: rule review (accept / reject) ──
+    if (body.reviewAction !== undefined) {
+      return handleReview(request, id, session.user.id, session.user.organizationId, body.reviewAction);
+    }
 
     const updateData: Record<string, unknown> = {};
 
@@ -83,6 +93,7 @@ export async function PATCH(
       category: updated.category,
       isActive: updated.isActive,
       isManual: updated.isManual,
+      status: updated.status,
       createdAt: updated.createdAt,
     });
   } catch (err) {
@@ -92,6 +103,65 @@ export async function PATCH(
     }
     return Response.json({ error: 'خطا در بروزرسانی قاعده' }, { status: 500 });
   }
+}
+
+/**
+ * Review flow: ACCEPT promotes a DRAFT/PENDING_LLM rule to ACTIVE (enters the
+ * runtime compile set); REJECT marks it REJECTED (excluded from compile, kept
+ * for audit). Non-reviewable statuses are refused deterministically.
+ */
+async function handleReview(
+  request: NextRequest,
+  id: string,
+  actorId: string,
+  organizationId: string,
+  reviewAction: unknown,
+) {
+  if (reviewAction !== 'ACCEPT' && reviewAction !== 'REJECT') {
+    return Response.json(
+      { error: 'reviewAction باید ACCEPT یا REJECT باشد' },
+      { status: 400 },
+    );
+  }
+
+  const rule = await db.policyRule.findFirst({ where: { id, organizationId } });
+  if (!rule) {
+    return Response.json({ error: 'قاعده یافت نشد' }, { status: 404 });
+  }
+
+  const status = rule.status as RuleStatus;
+  if (!['DRAFT', 'PENDING_LLM', 'REVIEW'].includes(status)) {
+    return Response.json(
+      { error: `قاعده در وضعیت ${status} قابل بررسی نیست` },
+      { status: 400 },
+    );
+  }
+
+  const nextStatus: RuleStatus = reviewAction === 'ACCEPT' ? 'ACTIVE' : 'REJECTED';
+  const updated = await updatePolicyRule(id, {
+    status: nextStatus,
+    reviewNote:
+      reviewAction === 'ACCEPT'
+        ? 'تأییدشده توسط مدیر'
+        : 'ردشده توسط مدیر',
+  });
+
+  await createPolicyAuditLog({
+    organizationId,
+    actorId,
+    action: reviewAction === 'ACCEPT' ? 'RULE_ACCEPT' : 'RULE_REJECT',
+    targetType: 'POLICY_RULE',
+    targetId: id,
+    metadata: { code: rule.code, from: status, to: nextStatus },
+  });
+
+  return Response.json({
+    id: updated.id,
+    code: updated.code,
+    status: updated.status,
+    isActive: updated.isActive,
+    reviewNote: updated.reviewNote,
+  });
 }
 
 // DELETE /api/admin/rules/[id]

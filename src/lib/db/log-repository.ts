@@ -28,11 +28,22 @@ export async function createDecisionLog(entry: DecisionLogEntry): Promise<Policy
       sourceIp: entry.sourceIp ?? null,
       promptTokens: entry.promptTokens ?? null,
       completionTokens: entry.completionTokens ?? null,
+      // Phase 5 Semantic Pipeline audit fields (spec §37)
+      sensitivity: entry.sensitivity ?? null,
+      matchedConceptIds: JSON.stringify(entry.matchedConceptIds ?? []),
+      retrievalScores:
+        typeof entry.retrievalScores === 'string'
+          ? entry.retrievalScores
+          : JSON.stringify(entry.retrievalScores ?? []),
+      classifierMethod: entry.classifierMethod ?? null,
+      egressMode: entry.egressMode ?? null,
+      policyVersion: entry.policyVersion ?? null,
+      pipelineHealth: entry.pipelineHealth ?? null,
     },
   });
 }
 
-interface DecisionLogFilters {
+export interface DecisionLogFilters {
   action?: PolicyAction;
   route?: 'EXTERNAL' | 'LOCAL' | 'BLOCKED';
   classifierRisk?: string;

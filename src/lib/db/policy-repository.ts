@@ -1,7 +1,15 @@
 import { db } from './client';
 import type { PolicyDocument, PolicyRule } from './types';
 import type { PolicySnapshot } from './types';
-import { Prisma, type PolicyDocumentStatus, type RuleSeverity } from '@prisma/client';
+import {
+  Prisma,
+  type PolicyDocumentStatus,
+  type RuleSeverity,
+  type PolicyLifecycle,
+  type RuleStatus,
+  type RuleDetectorType,
+  type CompiledRuleAction,
+} from '@prisma/client';
 
 // ─── Policy Documents ──────────────────────────────────────────────────────
 
@@ -35,8 +43,20 @@ export async function createPolicyDocument(data: {
   size: number;
   storagePath: string;
   uploadedById: string;
+  sourceType?: 'PDF' | 'TXT' | 'MD';
 }): Promise<PolicyDocument> {
-  return db.policyDocument.create({ data });
+  return db.policyDocument.create({
+    data: {
+      id: data.id,
+      organizationId: data.organizationId,
+      filename: data.filename,
+      mimeType: data.mimeType,
+      size: data.size,
+      storagePath: data.storagePath,
+      uploadedById: data.uploadedById,
+      sourceType: data.sourceType ?? 'PDF',
+    },
+  });
 }
 
 export async function updatePolicyDocumentStatus(
@@ -66,13 +86,55 @@ export async function activatePolicyDocument(
 
   await db.policyDocument.updateMany({
     where: { organizationId, isActive: true, id: { not: id } },
-    data: { isActive: false },
+    data: { isActive: false, lifecycle: 'ARCHIVED' as PolicyLifecycle },
   });
 
   return db.policyDocument.update({
     where: { id },
-    data: { isActive: true },
+    data: { isActive: true, lifecycle: 'ACTIVE' as PolicyLifecycle, activatedAt: new Date() },
   });
+}
+
+/** Lifecycle transition (Sensitive-Data Layer) — validity is checked by canTransitionLifecycle. */
+export async function updatePolicyDocumentLifecycle(
+  id: string,
+  organizationId: string,
+  lifecycle: PolicyLifecycle,
+): Promise<PolicyDocument> {
+  const doc = await db.policyDocument.findFirst({ where: { id, organizationId } });
+  if (!doc) {
+    throw new Error(`PolicyDocument with id "${id}" not found in organization "${organizationId}"`);
+  }
+  const data: Record<string, unknown> = { lifecycle };
+  if (lifecycle === 'REVIEW') data.reviewedAt = new Date();
+  if (lifecycle === 'ACTIVE') {
+    data.activatedAt = new Date();
+    data.isActive = true;
+  }
+  if (lifecycle === 'ARCHIVED') data.isActive = false;
+  return db.policyDocument.update({ where: { id }, data });
+}
+
+/** Persist compiled runtime rules (JSON) written on activation. */
+export async function saveCompiledRules(
+  id: string,
+  compiledJson: string,
+): Promise<PolicyDocument> {
+  return db.policyDocument.update({ where: { id }, data: { compiledRules: compiledJson } });
+}
+
+/** Fetch compiled rules of the ACTIVE document (already parsed & validated). */
+export async function getActiveCompiledRules(
+  organizationId: string,
+): Promise<import('@/lib/policy/types').CompiledPolicyRule[]> {
+  const active = await getActivePolicyDocument(organizationId);
+  if (!active?.compiledRules) return [];
+  try {
+    const parsed = JSON.parse(active.compiledRules);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }
 
 export async function deletePolicyDocument(id: string, organizationId: string): Promise<void> {
@@ -105,7 +167,7 @@ export async function getPolicySnapshot(organizationId: string): Promise<PolicyS
       title: r.title,
       keywords: safeParseJsonArray(r.keywords),
       patterns: safeParseJsonArray(r.patterns),
-      severity: r.severity as string,
+      severity: r.severity as RuleSeverity,
       category: r.category,
       isActive: r.isActive,
     })),
@@ -127,9 +189,34 @@ export async function createPolicyChunks(
     content: string;
     normalizedContent: string;
     isRestricted: boolean;
+    pageIndex?: number | null;
+    textHash?: string | null;
+    spanStart?: number | null;
+    spanEnd?: number | null;
+    isCandidate?: boolean;
   }[],
 ): Promise<void> {
-  await db.policyChunk.createMany({ data: chunks });
+  await db.policyChunk.createMany({
+    data: chunks.map((c) => ({
+      documentId: c.documentId,
+      index: c.index,
+      content: c.content,
+      normalizedContent: c.normalizedContent,
+      isRestricted: c.isRestricted,
+      pageIndex: c.pageIndex ?? null,
+      textHash: c.textHash ?? null,
+      spanStart: c.spanStart ?? null,
+      spanEnd: c.spanEnd ?? null,
+      isCandidate: c.isCandidate ?? false,
+    })),
+  });
+}
+
+export async function getPolicyChunks(documentId: string) {
+  return db.policyChunk.findMany({
+    where: { documentId },
+    orderBy: { index: 'asc' },
+  });
 }
 
 // ─── Policy Rules ───────────────────────────────────────────────────────────
@@ -190,7 +277,20 @@ export async function createPolicyRule(data: {
   severity: RuleSeverity;
   category?: string;
   isManual?: boolean;
+  status?: RuleStatus;
+  detectorType?: RuleDetectorType;
+  checksumKind?: string;
+  dictionaryId?: string;
+  action?: CompiledRuleAction;
+  priority?: number;
+  sourceQuote?: string;
+  sourcePage?: number | null;
+  textHash?: string;
+  conflictGroup?: string;
+  reviewNote?: string;
+  chunkId?: string;
 }): Promise<PolicyRule> {
+  const status = data.status ?? 'ACTIVE';
   return db.policyRule.create({
     data: {
       documentId: data.documentId ?? null,
@@ -203,8 +303,30 @@ export async function createPolicyRule(data: {
       severity: data.severity,
       category: data.category ?? null,
       isManual: data.isManual ?? false,
+      status,
+      detectorType: data.detectorType ?? 'SEMANTIC',
+      checksumKind: data.checksumKind ?? null,
+      dictionaryId: data.dictionaryId ?? null,
+      action: data.action ?? 'BLOCK_EXTERNAL',
+      priority: data.priority ?? 100,
+      sourceQuote: data.sourceQuote ?? null,
+      sourcePage: data.sourcePage ?? null,
+      textHash: data.textHash ?? null,
+      conflictGroup: data.conflictGroup ?? null,
+      reviewNote: data.reviewNote ?? null,
+      chunkId: data.chunkId ?? null,
+      // status ⇔ isActive stay in lockstep for backward compatibility.
+      isActive: status === 'ACTIVE',
     },
   });
+}
+
+/** Find an existing org rule with the same stable text hash (dedupe). */
+export async function findRuleByTextHash(
+  organizationId: string,
+  textHash: string,
+): Promise<PolicyRule | null> {
+  return db.policyRule.findFirst({ where: { organizationId, textHash } });
 }
 
 export async function updatePolicyRule(
@@ -219,6 +341,13 @@ export async function updatePolicyRule(
     category: string | null;
     isActive: boolean;
     isManual: boolean;
+    status: RuleStatus;
+    action: CompiledRuleAction;
+    priority: number;
+    reviewNote: string | null;
+    conflictGroup: string | null;
+    checksumKind: string | null;
+    dictionaryId: string | null;
   }>,
 ): Promise<PolicyRule> {
   const existing = await db.policyRule.findUnique({ where: { id } });
@@ -234,6 +363,13 @@ export async function updatePolicyRule(
   if (data.patterns !== undefined) {
     updateData.patterns = JSON.stringify(data.patterns);
   }
+  // status ⇔ isActive stay in lockstep for backward compatibility.
+  if (data.status !== undefined) {
+    updateData.isActive = data.status === 'ACTIVE';
+  }
+  if (data.isActive !== undefined && data.status === undefined) {
+    updateData.status = data.isActive ? 'ACTIVE' : 'ARCHIVED';
+  }
 
   return db.policyRule.update({
     where: { id },
@@ -247,6 +383,50 @@ export async function deletePolicyRule(id: string, organizationId: string): Prom
     throw new Error(`PolicyRule with id "${id}" not found in organization "${organizationId}"`);
   }
   await db.policyRule.delete({ where: { id } });
+}
+
+/**
+ * Reset a document's extraction artifacts for reprocessing:
+ * deletes its chunks and its AUTO-extracted rules (isManual=false, bound to
+ * this document). Manual rules and rules of other documents are untouched.
+ * Returns how many chunks / rules were removed.
+ */
+export async function resetPolicyDocumentExtraction(documentId: string): Promise<{
+  deletedChunks: number;
+  deletedRules: number;
+}> {
+  const deletedChunks = await db.policyChunk.deleteMany({ where: { documentId } });
+  const deletedRules = await db.policyRule.deleteMany({
+    where: { documentId, isManual: false },
+  });
+  return { deletedChunks: deletedChunks.count, deletedRules: deletedRules.count };
+}
+
+/**
+ * Activation semantics for the rule runtime:
+ * the LIVE policy = this document's rules + manual (admin-managed) rules.
+ * AUTO-extracted rules of every OTHER document (incl. archived docs and
+ * orphans with documentId=null) are deactivated so stale extractions — e.g.
+ * rules from an older, text-corrupted upload — stop firing at runtime.
+ */
+export async function activatePolicyRulesForDocument(
+  organizationId: string,
+  documentId: string,
+): Promise<{ activated: number; deactivated: number }> {
+  const deactivated = await db.policyRule.updateMany({
+    where: {
+      organizationId,
+      isManual: false,
+      isActive: true,
+      NOT: { documentId },
+    },
+    data: { isActive: false },
+  });
+  const activated = await db.policyRule.updateMany({
+    where: { organizationId, documentId, isManual: false },
+    data: { isActive: true },
+  });
+  return { activated: activated.count, deactivated: deactivated.count };
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

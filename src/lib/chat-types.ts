@@ -2,8 +2,8 @@
 
 export type ChatRole = "user" | "assistant" | "system";
 
-/** Phase 3 routing decision (Smart DLP & Prompt Routing). */
-export type ChatRoute = "EXTERNAL" | "LOCAL" | "BLOCKED";
+/** Phase 3/6 routing decision (Smart DLP, Prompt Routing & Action Precedence). */
+export type ChatRoute = "EXTERNAL" | "EXTERNAL_DIRECT" | "EXTERNAL_MASKED" | "LOCAL" | "BLOCKED";
 
 export interface MaskFindingDto {
   label: string;
@@ -16,6 +16,13 @@ export interface ClassifierDto {
   riskLevel: string;
   reason: string;
   method: string;
+}
+
+/** Sensitive-Data Layer: deterministic detection verdict (for "meta"). */
+export interface DetectionDto {
+  decision: "SAFE" | "SENSITIVE" | "UNCERTAIN";
+  hitLabels: string[];
+  method: "deterministic" | "local_llm" | "fallback" | string;
 }
 
 export interface ChatMessage {
@@ -37,6 +44,8 @@ export interface ChatMessage {
   route?: ChatRoute;
   maskLabels?: MaskFindingDto[];
   classifier?: ClassifierDto;
+  /** Sensitive-Data Layer: deterministic detection verdict. */
+  detection?: DetectionDto;
 }
 
 export interface ChatApiRequest {
@@ -63,6 +72,8 @@ export interface ChatStreamChunk {
   route?: ChatRoute;
   /** Phase 3 masked findings (for "meta"). */
   maskLabels?: MaskFindingDto[];
-  /** Phase 3 classifier verdict (for "meta"). */
+  /** Phase 3 classifier verdict (for "meta") — legacy field. */
   classifier?: ClassifierDto;
+  /** Sensitive-Data Layer deterministic verdict (for "meta"). */
+  detection?: DetectionDto;
 }

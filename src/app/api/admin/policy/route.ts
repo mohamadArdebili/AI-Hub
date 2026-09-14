@@ -1,6 +1,10 @@
 import { NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
-import { getPolicyDocuments, createPolicyDocument } from '@/lib/db';
+import {
+  getPolicyDocuments,
+  createPolicyDocument,
+  createPolicyAuditLog,
+} from '@/lib/db';
 import { processPolicyDocument } from '@/lib/policy/pdf-processor';
 import fs from 'fs';
 import path from 'path';
@@ -26,6 +30,11 @@ export async function GET(request: NextRequest) {
       status: d.status,
       version: d.version,
       isActive: d.isActive,
+      sourceType: d.sourceType,
+      lifecycle: d.lifecycle,
+      hasCompiledRules: Boolean(d.compiledRules),
+      reviewedAt: d.reviewedAt,
+      activatedAt: d.activatedAt,
       extractedCharCount: d.extractedCharCount,
       errorMessage: d.errorMessage,
       createdAt: d.createdAt,
@@ -49,10 +58,18 @@ export async function POST(request: NextRequest) {
       return Response.json({ error: 'فایل ارسال نشده است' }, { status: 400 });
     }
 
-    // Validate MIME type
-    if (file.type !== 'application/pdf') {
+    // Sensitive-Data Layer: PDF, TXT and MD sources are accepted.
+    const lowerName = file.name.toLowerCase();
+    let sourceType: 'PDF' | 'TXT' | 'MD';
+    if (file.type === 'application/pdf' || lowerName.endsWith('.pdf')) {
+      sourceType = 'PDF';
+    } else if (lowerName.endsWith('.txt')) {
+      sourceType = 'TXT';
+    } else if (lowerName.endsWith('.md') || lowerName.endsWith('.markdown')) {
+      sourceType = 'MD';
+    } else {
       return Response.json(
-        { error: 'فقط فایل‌های PDF مجاز هستند' },
+        { error: 'فقط فایل‌های PDF، TXT و Markdown مجاز هستند' },
         { status: 400 },
       );
     }
@@ -65,11 +82,18 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Read file buffer and check magic bytes
+    // Read file buffer; verify PDF magic bytes only for PDF sources.
     const buffer = Buffer.from(await file.arrayBuffer());
-    if (buffer.slice(0, 4).toString('ascii') !== '%PDF') {
+    if (sourceType === 'PDF' && buffer.slice(0, 4).toString('ascii') !== '%PDF') {
       return Response.json(
         { error: 'فایل PDF نامعتبر است' },
+        { status: 400 },
+      );
+    }
+    // Basic sanity for text sources: must decode as UTF-8 without NUL bytes.
+    if (sourceType !== 'PDF' && buffer.includes(0)) {
+      return Response.json(
+        { error: 'فایل متنی معتبر نیست' },
         { status: 400 },
       );
     }
@@ -77,9 +101,10 @@ export async function POST(request: NextRequest) {
     // Sanitize filename
     const sanitized = path.basename(file.name).replace(/[^a-zA-Z0-9._\-\u0600-\u06FF]/g, '_');
 
-    // Generate document ID and save file
+    // Generate document ID and save file (extension matches the source type)
     const documentId = crypto.randomUUID();
-    const storagePath = path.join(UPLOADS_DIR, `${documentId}.pdf`);
+    const ext = sourceType === 'PDF' ? '.pdf' : sourceType === 'TXT' ? '.txt' : '.md';
+    const storagePath = path.join(UPLOADS_DIR, `${documentId}${ext}`);
 
     // Ensure the uploads directory exists (fresh clones / new machines don't
     // have it — writeFileSync would otherwise throw ENOENT).
@@ -87,20 +112,37 @@ export async function POST(request: NextRequest) {
 
     fs.writeFileSync(storagePath, buffer);
 
-    // Create DB record — pass the SAME id used for the stored file, so
-    // processPolicyDocument (which looks for `${doc.id}.pdf`) finds it.
+    // Create DB record — pass the SAME id used for the stored file.
     const doc = await createPolicyDocument({
       id: documentId,
       organizationId: session.user.organizationId,
       filename: sanitized,
-      mimeType: 'application/pdf',
+      mimeType: sourceType === 'PDF' ? 'application/pdf' : 'text/plain',
       size: file.size,
       storagePath,
       uploadedById: session.user.id,
+      sourceType,
     });
 
-    // Fire-and-forget processing
-    processPolicyDocument(doc.id, session.user.organizationId).catch(() => {
+    await createPolicyAuditLog({
+      organizationId: session.user.organizationId,
+      actorId: session.user.id,
+      action: 'UPLOAD',
+      targetType: 'POLICY_DOCUMENT',
+      targetId: doc.id,
+      metadata: { filename: sanitized, sourceType, size: file.size },
+    });
+
+    // Fire-and-forget processing — TXT/MD text is passed inline; PDF is read
+    // from disk inside the processor by document id.
+    const rawTextOverride =
+      sourceType === 'PDF' ? undefined : buffer.toString('utf8');
+    processPolicyDocument(
+      doc.id,
+      session.user.organizationId,
+      sourceType,
+      rawTextOverride,
+    ).catch(() => {
       // Errors handled inside processPolicyDocument
     });
 
@@ -111,6 +153,8 @@ export async function POST(request: NextRequest) {
       status: doc.status,
       version: doc.version,
       isActive: doc.isActive,
+      sourceType: doc.sourceType,
+      lifecycle: doc.lifecycle,
       createdAt: doc.createdAt,
     }, { status: 201 });
   } catch (err) {

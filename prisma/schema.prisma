@@ -39,6 +39,71 @@ enum MaskKind {
   PROPRIETARY_SERVICE
 }
 
+// Sensitive-Data Layer: policy document lifecycle (DRAFT → REVIEW → ACTIVE → ARCHIVED)
+enum PolicyLifecycle {
+  DRAFT
+  REVIEW
+  ACTIVE
+  ARCHIVED
+}
+
+// Sensitive-Data Layer: per-rule review state
+enum RuleStatus {
+  DRAFT
+  REVIEW
+  ACTIVE
+  ARCHIVED
+  REJECTED
+  PENDING_LLM
+}
+
+// Sensitive-Data Layer: which deterministic detector produced a rule
+enum RuleDetectorType {
+  REGEX
+  CHECKSUM
+  DICTIONARY
+  SEMANTIC
+}
+
+// Sensitive-Data Layer: what the runtime must do when a compiled rule hits
+enum CompiledRuleAction {
+  BLOCK_EXTERNAL
+  MASK
+  FLAG_REVIEW
+}
+
+// ─── Phase 1: Policy Concept Enums ──────────────────────────────────────────
+
+enum ConceptSensitivity {
+  PUBLIC
+  INTERNAL
+  CONFIDENTIAL
+  HIGHLY_CONFIDENTIAL
+}
+
+enum ConceptAction {
+  ALLOW_EXTERNAL
+  ROUTE_LOCAL
+  MASK_AND_ALLOW_EXTERNAL
+  BLOCK
+}
+
+enum ConceptReviewStatus {
+  DRAFT
+  REVIEW        // پیش‌فرض پس از استخراج LLM (spec §13: بدون تأیید فعال نمی‌شود)
+  ACTIVE
+  ARCHIVED
+  REJECTED
+}
+
+enum PolicyUnitType {
+  HEADING
+  PARAGRAPH
+  BULLET_GROUP
+  TABLE
+  CLAUSE
+}
+
 // ─── Organization ───────────────────────────────────────────────────────────
 
 model Organization {
@@ -53,6 +118,8 @@ model Organization {
   decisionLogs    PolicyDecisionLog[]
   chatSessions    ChatSession[]
   maskDictionary  MaskDictionary[]
+  policyAuditLogs PolicyAuditLog[]
+  policyConcepts  PolicyConcept[]
 }
 
 // ─── User ───────────────────────────────────────────────────────────────────
@@ -106,10 +173,24 @@ model PolicyDocument {
   createdAt        DateTime            @default(now())
   updatedAt        DateTime            @updatedAt
 
+  // ── Sensitive-Data Layer: ingestion provenance & lifecycle ──
+  sourceType       String              @default("PDF")   // PDF | TXT | MD
+  lifecycle        PolicyLifecycle     @default(DRAFT)
+  compiledRules    String?             // JSON: CompiledPolicyRule[] (written on activation)
+  reviewedAt       DateTime?
+  activatedAt      DateTime?
+
+  // ── Phase 1: Concept extraction & semantic indexing fields ──
+  conceptExtractionStatus String?   // PENDING | RUNNING | DONE | FAILED
+  conceptStats            String?   // JSON: {units, concepts, rejected, pendingReview}
+  indexedAt               DateTime? // آخرین زمان rebuild ایندکس برداری
+
   organization Organization @relation(fields: [organizationId], references: [id])
   uploadedBy  User          @relation(fields: [uploadedById], references: [id])
   chunks      PolicyChunk[]
   rules       PolicyRule[]
+  units       PolicyUnit[]
+  concepts    PolicyConcept[]
 }
 
 // ─── Policy Chunk ───────────────────────────────────────────────────────────
@@ -117,14 +198,22 @@ model PolicyDocument {
 model PolicyChunk {
   id               String  @id @default(cuid())
   documentId       String
-  index            Int
+  index            Int              // ordinal within the document (0-based)
   content          String
   normalizedContent String
   isRestricted     Boolean @default(false)
 
+  // ── Sensitive-Data Layer: provenance & candidate marking ──
+  pageIndex        Int?      // 1-based source page (null for TXT without pages)
+  textHash         String?   // sha256 of the exact chunk text (stable id)
+  spanStart        Int?      // char offset in the full extracted text
+  spanEnd          Int?
+  isCandidate      Boolean @default(false) // marked by deterministic keyword filter
+
   document PolicyDocument @relation(fields: [documentId], references: [id], onDelete: Cascade)
 
   @@index([documentId])
+  @@index([documentId, index])
 }
 
 // ─── Policy Rule ────────────────────────────────────────────────────────────
@@ -145,12 +234,46 @@ model PolicyRule {
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
+  // ── Sensitive-Data Layer: review lifecycle & detector typing ──
+  status         RuleStatus         @default(ACTIVE)
+  detectorType   RuleDetectorType   @default(SEMANTIC)
+  checksumKind   String?            // IR_NATIONAL_ID | IR_BANK_CARD | IBAN
+  dictionaryId   String?            // MaskDictionary reference (future)
+  action         CompiledRuleAction @default(BLOCK_EXTERNAL)
+  priority       Int                @default(100)   // lower = higher priority
+  sourceQuote    String?            // mandatory provenance quote from the chunk
+  sourcePage     Int?
+  textHash       String?            // stable dedupe hash (normalized rule identity)
+  conflictGroup  String?            // rules with overlapping scope but different actions
+  reviewNote     String?            // e.g. "duplicate of R-004" / rejection reason
+  chunkId        String?            // originating chunk (provenance)
+
   document     PolicyDocument? @relation(fields: [documentId], references: [id], onDelete: SetNull)
   organization Organization    @relation(fields: [organizationId], references: [id])
   decisionLogs PolicyDecisionLog[] @relation("RuleToLog")
 
   @@unique([organizationId, code])
   @@index([organizationId])
+  @@index([organizationId, status])
+  @@index([documentId])
+}
+
+// ─── Policy Audit Log (Sensitive-Data Layer — NO raw sensitive content) ────
+
+model PolicyAuditLog {
+  id             String   @id @default(cuid())
+  organizationId String
+  actorId        String?  // User id (null = system/background)
+  action         String   // UPLOAD | CHUNKING | RULE_PROPOSE | RULE_ACCEPT | RULE_REJECT | ACTIVATE | LIFECYCLE | RUNTIME_SENSITIVE | RUNTIME_UNCERTAIN | ...
+  targetType     String   // POLICY_DOCUMENT | POLICY_RULE | POLICY_CHUNK | RUNTIME_DECISION
+  targetId       String?
+  metadataJson   String   @default("{}") // hashes/counts/types/ids ONLY — never raw sensitive text
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, createdAt])
+  @@index([action])
 }
 
 // ─── Mask Dictionary (Sanitizer dictionaries, Phase 3) ─────────────────────
@@ -200,6 +323,15 @@ model PolicyDecisionLog {
   promptTokens        Int?
   completionTokens    Int?
 
+  // ── Phase 1 / Semantic Pipeline audit fields (spec §37) ──
+  sensitivity        String?   // PUBLIC | INTERNAL | CONFIDENTIAL | HIGHLY_CONFIDENTIAL
+  matchedConceptIds  String    @default("[]")  // JSON
+  retrievalScores    String?   // JSON: [{conceptId, score}]
+  classifierMethod   String?   // local_llm | deterministic | heuristic | fallback
+  egressMode         String?   // DIRECT | MASKED | NONE
+  policyVersion      Int?      // نسخه سند سیاست فعال در لحظه تصمیم
+  pipelineHealth     String?   // HEALTHY | DEGRADED | FAILED
+
   user         User        @relation(fields: [userId], references: [id])
   organization  Organization @relation(fields: [organizationId], references: [id])
   matchedRules PolicyRule[]  @relation("RuleToLog")
@@ -237,3 +369,112 @@ model ChatMessage {
 
   @@index([sessionId])
 }
+
+// ─── Phase 1: Policy Unit (Semantic Segmenter output — spec §11) ───────────
+
+model PolicyUnit {
+  id             String         @id @default(cuid())
+  documentId     String
+  ordinal        Int
+  page           Int?           // 1-based (null for sources without pages)
+  sectionTitle   String?
+  text           String
+  normalizedText String
+  unitType       PolicyUnitType
+  spanStart      Int
+  spanEnd        Int
+  isCandidate    Boolean        @default(false) // marked for LLM prioritization (spec §42)
+  createdAt      DateTime       @default(now())
+
+  document PolicyDocument      @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  concepts PolicyConcept[]
+  sources  PolicyConceptSource[]
+
+  @@index([documentId])
+}
+
+// ─── Phase 1: Policy Concept (Core semantic entity — spec §7) ──────────────
+
+model PolicyConcept {
+  id               String              @id @default(cuid())
+  organizationId   String
+  documentId       String
+  unitId           String?
+  conceptKey       String              // stable semantic merge key, e.g. personal_contact_information
+  name             String              // display/technical name
+  nameFa           String?
+  descriptionFa    String
+  category         String?
+  sensitivity      ConceptSensitivity
+  action           ConceptAction
+  conditions       String              @default("[]")   // JSON: conditions / exceptions (spec §67)
+  keywords         String              @default("[]")   // JSON: hint only, not detection mechanism (spec §41)
+  detectorHints    String?             // JSON: {regex?, checksum?, dictionary?}
+  sourceQuote      String              // mandatory provenance quote (spec §13/Rule 10)
+  sourcePage       Int?
+  confidence       Float               @default(0)
+  reviewStatus     ConceptReviewStatus @default(REVIEW)
+  extractedByModel String?             // e.g. qwen3:1.7b
+  reviewNote       String?
+  textHash         String?             // sha256 normalized identity for dedupe
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  organization Organization            @relation(fields: [organizationId], references: [id])
+  document     PolicyDocument          @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  unit         PolicyUnit?             @relation(fields: [unitId], references: [id], onDelete: SetNull)
+  examples     PolicyConceptExample[]
+  sources      PolicyConceptSource[]
+  embedding    PolicyConceptEmbedding?
+
+  @@unique([documentId, conceptKey])
+  @@index([organizationId, reviewStatus])
+  @@index([documentId])
+}
+
+// ─── Phase 1: Multi-source provenance for PolicyConcept ────────────────────
+
+model PolicyConceptSource {
+  id        String   @id @default(cuid())
+  conceptId String
+  unitId    String?
+  page      Int?
+  quote     String
+  quoteHash String
+  createdAt DateTime @default(now())
+
+  concept PolicyConcept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+  unit    PolicyUnit?   @relation(fields: [unitId], references: [id], onDelete: SetNull)
+
+  @@unique([conceptId, quoteHash])
+  @@index([conceptId])
+}
+
+// ─── Phase 1: Positive/Negative Examples (spec §8) ─────────────────────────
+
+model PolicyConceptExample {
+  id        String   @id @default(cuid())
+  conceptId String
+  kind      String   // "POSITIVE" | "NEGATIVE"
+  text      String
+  createdAt DateTime @default(now())
+
+  concept PolicyConcept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+
+  @@index([conceptId])
+}
+
+// ─── Phase 1: Embedding Vector for Active Concepts (spec §16) ──────────────
+
+model PolicyConceptEmbedding {
+  id        String   @id @default(cuid())
+  conceptId String   @unique
+  vector    String   // JSON: number[] — only ACTIVE concepts indexed
+  model     String   // embedding model identifier, e.g. bge-m3
+  dim       Int
+  textHash  String   // sha256 of embedded text to detect drift
+  updatedAt DateTime @updatedAt
+
+  concept PolicyConcept @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+}
+

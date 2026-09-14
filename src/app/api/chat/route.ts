@@ -3,19 +3,28 @@ import { NextRequest } from "next/server";
 
 import { getAuthSession } from "@/lib/auth";
 import { evaluate } from "@/lib/policy";
-import { classifyPrompt, decideRoute, CATEGORIES } from "@/lib/policy/classifier";
-import { sanitizePrompt, MASK_LABELS } from "@/lib/policy/sanitizer";
+import { isCriticalHitSet } from "@/lib/policy/classifier";
+import { runDetection } from "@/lib/policy/detection-pipeline";
+import {
+  assertExternalSafeAllowed,
+  assertExternalEgressAllowed,
+  assertNoExternalLlmInDetection,
+} from "@/lib/policy/external-guard";
+import { sanitizePrompt, sanitizePromptWithReport, MASK_LABELS } from "@/lib/policy/sanitizer";
 import {
   getPolicySnapshot,
   createDecisionLog,
   getActiveMaskTerms,
+  getActiveCompiledRules,
+  createPolicyAuditLog,
 } from "@/lib/db";
 import {
   llmStreamChat,
   estimateTokens,
   type LlmMessage,
 } from "@/lib/llm/client";
-import type { ChatStreamChunk } from "@/lib/chat-types";
+import type { ChatStreamChunk, ChatRoute } from "@/lib/chat-types";
+import type { PolicyDecision } from "@/lib/policy/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -27,14 +36,30 @@ type NormalizedMessage = {
   content: string;
 };
 
-const PIPELINE_VERSION = "phase3-dlp-router-1.0";
+const PIPELINE_VERSION = "sensitive-data-layer-1.0";
 
-const RISK_FA: Record<string, string> = {
-  low: "کم",
-  medium: "متوسط",
-  high: "بالا",
-  critical: "بحرانی",
+/** Persian labels for detection hit categories (local-route notice). */
+const HIT_CATEGORY_FA: Record<string, string> = {
+  national_id: "کد ملی",
+  ir_bank_card: "شماره کارت بانکی",
+  iban: "شماره شبا",
+  api_key: "کلید API",
+  private_key: "کلید خصوصی",
+  credential: "اعتبارنامه اتصال",
+  connection_string: "رشته اتصال پایگاه داده",
+  bulk_email: "آدرس ایمیل انبوه",
+  bulk_mobile: "شماره موبایل انبوه",
+  jailbreak_injection: "تلاش دور زدن فیلتر",
+  senior_officer: "مدیر ارشد (دیکشنری)",
+  telco_hub_node: "مرکز مخابراتی (دیکشنری)",
+  proprietary_service: "سرویس انحصاری (دیکشنری)",
+  policy_regex: "قاعدهٔ سیاست سازمانی",
+  policy_semantic: "قاعدهٔ معنایی سیاست سازمانی",
 };
+
+function hitLabel(hit: { category: string; ruleLabel?: string }): string {
+  return hit.ruleLabel ?? HIT_CATEGORY_FA[hit.category] ?? hit.category;
+}
 
 function jsonError(message: string, status = 400) {
   return Response.json({ error: message }, { status });
@@ -83,25 +108,26 @@ function getClientIp(req: NextRequest): string {
 }
 
 function buildLocalNotice(
-  classifierCategory: string,
-  classifierRisk: string,
-  classifierReason: string,
+  outcomeReason: string,
+  hits: Array<{ category: string; ruleLabel?: string }>,
+  decision: string,
   maskSummary: string | null
 ): string {
-  const categoryFa = CATEGORIES[classifierCategory]?.fa ?? classifierCategory;
+  const labels = Array.from(new Set(hits.map(hitLabel)));
   const lines = [
-    "🔒 **این درخواست حساس تشخیص داده شد و به «مدل زبانی محلی» سازمان مسیریابی شد.**",
+    decision === "SENSITIVE"
+      ? "🔒 **این درخواست حساس تشخیص داده شد و به «مسیر امن محلی» سازمان هدایت شد.**"
+      : "⚠️ **نتیجهٔ تشخیص مبهم بود و به‌صورت fail-closed به «مسیر امن محلی» هدایت شد.**",
     "",
-    `- دسته‌بندی: ${categoryFa}`,
-    `- سطح ریسک: ${RISK_FA[classifierRisk] ?? classifierRisk}`,
-    `- دلیل: ${classifierReason}`,
+    `- دستهٔ تشخیص: ${labels.length > 0 ? labels.join("، ") : "نامشخص"}`,
+    `- دلیل: ${outcomeReason}`,
   ];
   if (maskSummary) {
     lines.push(`- داده‌های ماسک‌شده: ${maskSummary}`);
   }
   lines.push(
     "",
-    "پاسخ‌دهی توسط مدل محلی در فاز بعدی فعال می‌شود؛ در این فاز تشخیص و مسیریابی پیاده‌سازی شده و **هیچ داده‌ای به سرویس هوش مصنوعی بیرونی ارسال نشد**."
+    "در این فاز تشخیص و مسیریابی قطعی پیاده‌سازی شده و **هیچ داده‌ای به سرویس هوش مصنوعی بیرونی ارسال نشد**. پاسخ‌دهی با مدل محلی در فاز بعدی فعال می‌شود."
   );
   return lines.join("\n");
 }
@@ -176,67 +202,83 @@ export async function POST(req: NextRequest) {
   const dictionaries = await getActiveMaskTerms(organizationId);
   const sanitized = sanitizePrompt(lastUserMessage, dictionaries);
 
-  // ── Layer 2: Deterministic policy engine (فاز ۲ — روی متن اصلی) ──────
-  const policySnapshot = await getPolicySnapshot(organizationId);
-
-  const decision = await evaluate({
-    prompt: lastUserMessage,
-    organizationId,
-    policySnapshot,
-  });
-
   const promptHash = crypto
     .createHash("sha256")
     .update(lastUserMessage)
     .digest("hex");
 
   const streamEncoder = new TextEncoder();
+  const isSemanticEnabled = process.env.POLICY_SEMANTIC_ENABLED === 'true';
 
-  // ── Engine BLOCK path (مسدودسازی قطعی قواعد) ─────────────────────────
-  if (decision.action === "BLOCK") {
-    await createDecisionLog({
-      userId,
+  let legacyDecision: PolicyDecision | null = null;
+
+  // ── Layer 2: Deterministic policy engine (only in legacy mode when semantic is disabled) ──
+  if (!isSemanticEnabled) {
+    const policySnapshot = await getPolicySnapshot(organizationId);
+    legacyDecision = await evaluate({
+      prompt: lastUserMessage,
       organizationId,
-      action: "BLOCK",
-      score: decision.score,
-      reasons: decision.reasons,
-      matchedRuleIds: decision.matchedRules.map((r) => r.code),
-      promptHash,
-      promptPreview: maskPreview(sanitized.maskedText),
-      promptLength: lastUserMessage.length,
-      latencyMs: Math.round(decision.latencyMs),
-      engineVersion: decision.engineVersion,
-      route: "BLOCKED",
-      maskCount: sanitized.totalCount,
-      maskLabels: sanitized.findings,
-      sourceIp,
+      policySnapshot,
     });
 
-    const blockedChunk: ChatStreamChunk = {
-      type: "blocked",
-      reason: decision.reasons.join("\n"),
-      matchedRules: decision.matchedRules,
-    };
+    // ── Engine BLOCK path (مسدودسازی قطعی قواعد قدیمی) ───────────────────────
+    if (legacyDecision.action === "BLOCK") {
+      await createDecisionLog({
+        userId,
+        organizationId,
+        action: "BLOCK",
+        score: legacyDecision.score,
+        reasons: legacyDecision.reasons,
+        matchedRuleIds: legacyDecision.matchedRules.map((r) => r.code),
+        promptHash,
+        promptPreview: maskPreview(sanitized.maskedText),
+        promptLength: lastUserMessage.length,
+        latencyMs: Math.round(legacyDecision.latencyMs),
+        engineVersion: legacyDecision.engineVersion,
+        route: "BLOCKED",
+        maskCount: sanitized.totalCount,
+        maskLabels: sanitized.findings,
+        sourceIp,
+      });
 
-    return new Response(
-      new ReadableStream<Uint8Array>({
-        start(controller) {
-          controller.enqueue(
-            streamEncoder.encode(`data: ${JSON.stringify(blockedChunk)}\n\n`)
-          );
-          controller.enqueue(
-            streamEncoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`)
-          );
-          controller.close();
-        },
-      }),
-      { headers: sseHeaders() }
-    );
+      const blockedChunk: ChatStreamChunk = {
+        type: "blocked",
+        reason: legacyDecision.reasons.join("\n"),
+        matchedRules: legacyDecision.matchedRules,
+      };
+
+      return new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(
+              streamEncoder.encode(`data: ${JSON.stringify(blockedChunk)}\n\n`)
+            );
+            controller.enqueue(
+              streamEncoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`)
+            );
+            controller.close();
+          },
+        }),
+        { headers: sseHeaders() }
+      );
+    }
   }
 
-  // ── Layer 3: Smart Policy Classifier (تشخیص معنایی) ───────────────────
-  const classifier = await classifyPrompt(sanitized.maskedText);
-  const route = decideRoute(classifier);
+  // ── Layer 3: Detection Pipeline (DLP + Hybrid Retrieval + Local LLM Semantic Judge) ─
+  const compiledRules = await getActiveCompiledRules(organizationId);
+  const outcome = await runDetection({
+    prompt: lastUserMessage,
+    compiledRules,
+    dictionaries,
+    organizationId,
+  });
+  assertNoExternalLlmInDetection(outcome);
+
+  const decisionScore = legacyDecision?.score ?? (outcome.decision === "SAFE" ? 0 : 1);
+  const decisionReasons = legacyDecision?.reasons ?? (outcome.reason ? [outcome.reason] : []);
+  const decisionMatchedRuleIds = legacyDecision?.matchedRules.map((r) => r.code) ?? (outcome.matchedConcepts?.map((c) => c.conceptKey) ?? []);
+  const decisionLatencyMs = legacyDecision?.latencyMs ?? outcome.processing.durationMs;
+
   const maskSummary =
     sanitized.totalCount > 0
       ? sanitized.findings
@@ -244,23 +286,43 @@ export async function POST(req: NextRequest) {
           .join("، ")
       : null;
 
+  const chatRoute: ChatRoute =
+    outcome.route === "BLOCKED"
+      ? "BLOCKED"
+      : outcome.route === "LOCAL"
+      ? "LOCAL"
+      : outcome.route === "EXTERNAL_MASKED"
+      ? "EXTERNAL_MASKED"
+      : outcome.route === "EXTERNAL_DIRECT"
+      ? "EXTERNAL_DIRECT"
+      : outcome.decision === "SAFE"
+      ? "EXTERNAL"
+      : "LOCAL";
+
   const metaChunk: ChatStreamChunk = {
     type: "meta",
-    route,
+    route: chatRoute,
     maskLabels: sanitized.findings,
-    classifier: {
-      isSensitive: classifier.isSensitive,
-      category: classifier.category,
-      riskLevel: classifier.riskLevel,
-      reason: classifier.reason,
-      method: classifier.method,
+    detection: {
+      decision: outcome.decision,
+      hitLabels: Array.from(new Set(outcome.hits.map(hitLabel))),
+      method: outcome.classifier?.method ?? "deterministic",
     },
   };
 
-  // ── Router: CRITICAL → توقف + Violation Alert (ثبت در لاگ ممیزی) ─────
-  if (route === "BLOCKED") {
-    const categoryFa = CATEGORIES[classifier.category]?.fa ?? classifier.category;
-    const blockReason = `تخلف بحرانی از سیاست امنیتی شناسایی شد (${categoryFa}). درخواست متوقف و در کارتابل حراست ثبت شد.\n${classifier.reason}`;
+  // ── Router: BLOCKED or SENSITIVE-critical → توقف کامل (کارت تخلف بحرانی) ────
+  const isBlocked =
+    chatRoute === "BLOCKED" ||
+    (outcome.decision === "SENSITIVE" &&
+      chatRoute !== "EXTERNAL_MASKED" &&
+      isCriticalHitSet(
+        outcome.hits,
+        new Map(compiledRules.map((r) => [r.id, r.action])),
+      ));
+
+  if (isBlocked) {
+    const labels = Array.from(new Set(outcome.hits.map(hitLabel)));
+    const blockReason = `تخلف بحرانی از سیاست امنیتی شناسایی شد (${labels.join("، ")}). درخواست متوقف و در کارتابل حراست ثبت شد.\n${outcome.reason ?? ""}`;
 
     await createDecisionLog({
       userId,
@@ -268,21 +330,45 @@ export async function POST(req: NextRequest) {
       action: "BLOCK",
       score: 1,
       reasons: [blockReason],
-      matchedRuleIds: [],
+      matchedRuleIds: outcome.hits
+        .map((h) => h.ruleId)
+        .filter((x): x is string => Boolean(x)),
       promptHash,
       promptPreview: maskPreview(sanitized.maskedText),
       promptLength: lastUserMessage.length,
-      latencyMs: Math.round(decision.latencyMs),
+      latencyMs: Math.round(decisionLatencyMs),
       engineVersion: PIPELINE_VERSION,
       route: "BLOCKED",
       maskCount: sanitized.totalCount,
       maskLabels: sanitized.findings,
-      isSensitive: classifier.isSensitive,
-      classifierCategory: classifier.category,
-      classifierRisk: classifier.riskLevel,
-      classifierReason: classifier.reason,
-      classifierLatencyMs: classifier.latencyMs,
+      isSensitive: true,
+      classifierCategory: outcome.hits[0]?.category ?? null,
+      classifierRisk: "critical",
+      classifierReason: outcome.reason ?? null,
+      classifierLatencyMs: outcome.processing.durationMs,
       sourceIp,
+      sensitivity: outcome.sensitivity,
+      matchedConceptIds: outcome.matchedConcepts?.map((c) => c.conceptId) ?? [],
+      retrievalScores: outcome.matchedConcepts?.map((c) => ({ conceptId: c.conceptId, score: c.score })) ?? [],
+      classifierMethod: outcome.classifier?.method,
+      policyVersion: outcome.policyVersion,
+      pipelineHealth: outcome.pipelineHealth,
+    });
+
+    await createPolicyAuditLog({
+      organizationId,
+      actorId: userId,
+      action: "RUNTIME_SENSITIVE",
+      targetType: "RUNTIME_DECISION",
+      targetId: null,
+      metadata: {
+        decision: outcome.decision,
+        action: outcome.action,
+        hitCount: outcome.hits.length,
+        categories: Array.from(new Set(outcome.hits.map((h) => h.category))),
+        normalizedInputHash: outcome.processing.normalizedInputHash,
+        durationMs: outcome.processing.durationMs,
+      },
     });
 
     const blockedChunk: ChatStreamChunk = {
@@ -307,12 +393,18 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Router: SENSITIVE → مدل محلی (فعلاً: پیام جایگزین شفاف) ──────────
-  if (route === "LOCAL") {
+  // ── Router: LOCAL or non-external SENSITIVE / UNCERTAIN → مسیر امن محلی (fail-closed) ─
+  const isLocal =
+    chatRoute === "LOCAL" ||
+    (chatRoute !== "EXTERNAL_MASKED" &&
+      chatRoute !== "EXTERNAL_DIRECT" &&
+      outcome.decision !== "SAFE");
+
+  if (isLocal) {
     const notice = buildLocalNotice(
-      classifier.category,
-      classifier.riskLevel,
-      classifier.reason,
+      outcome.reason ?? "",
+      outcome.hits,
+      outcome.decision,
       maskSummary
     );
 
@@ -320,23 +412,45 @@ export async function POST(req: NextRequest) {
       userId,
       organizationId,
       action: "ALLOW",
-      score: decision.score,
-      reasons: [...decision.reasons, `مسیریابی به مدل محلی (${classifier.category})`],
-      matchedRuleIds: decision.matchedRules.map((r) => r.code),
+      score: decisionScore,
+      reasons: [...decisionReasons, `مسیریابی به مسیر امن محلی (${outcome.decision})`],
+      matchedRuleIds: decisionMatchedRuleIds,
       promptHash,
       promptPreview: maskPreview(sanitized.maskedText),
       promptLength: lastUserMessage.length,
-      latencyMs: Math.round(decision.latencyMs),
+      latencyMs: Math.round(decisionLatencyMs),
       engineVersion: PIPELINE_VERSION,
       route: "LOCAL",
       maskCount: sanitized.totalCount,
       maskLabels: sanitized.findings,
-      isSensitive: classifier.isSensitive,
-      classifierCategory: classifier.category,
-      classifierRisk: classifier.riskLevel,
-      classifierReason: classifier.reason,
-      classifierLatencyMs: classifier.latencyMs,
+      isSensitive: outcome.decision === "SENSITIVE",
+      classifierCategory: outcome.hits[0]?.category ?? null,
+      classifierRisk: outcome.decision === "SENSITIVE" ? "high" : "medium",
+      classifierReason: outcome.reason ?? null,
+      classifierLatencyMs: outcome.processing.durationMs,
       sourceIp,
+      sensitivity: outcome.sensitivity,
+      matchedConceptIds: outcome.matchedConcepts?.map((c) => c.conceptId) ?? [],
+      retrievalScores: outcome.matchedConcepts?.map((c) => ({ conceptId: c.conceptId, score: c.score })) ?? [],
+      classifierMethod: outcome.classifier?.method,
+      policyVersion: outcome.policyVersion,
+      pipelineHealth: outcome.pipelineHealth,
+    });
+
+    await createPolicyAuditLog({
+      organizationId,
+      actorId: userId,
+      action: outcome.decision === "SENSITIVE" ? "RUNTIME_SENSITIVE" : "RUNTIME_UNCERTAIN",
+      targetType: "RUNTIME_DECISION",
+      targetId: null,
+      metadata: {
+        decision: outcome.decision,
+        action: outcome.action,
+        hitCount: outcome.hits.length,
+        categories: Array.from(new Set(outcome.hits.map((h) => h.category))),
+        normalizedInputHash: outcome.processing.normalizedInputHash,
+        durationMs: outcome.processing.durationMs,
+      },
     });
 
     return new Response(
@@ -360,12 +474,46 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Router: GENERAL → External LLM با نسخهٔ ماسک‌شده ─────────────────
-  const outboundMessages: LlmMessage[] = messages.map((m, idx) =>
-    idx === messages.length - 1 - lastUserIndex
-      ? { role: "user", content: sanitized.maskedText }
-      : { role: m.role, content: m.content }
-  );
+  // ── Router: EXTERNAL_DIRECT or EXTERNAL_MASKED → External LLM با گارد سخت ────────
+  let outboundUserText: string;
+
+  if (chatRoute === "EXTERNAL_MASKED") {
+    const { result: maskedResult, report } = sanitizePromptWithReport(lastUserMessage, dictionaries);
+    assertExternalEgressAllowed({
+      outcome,
+      route: "EXTERNAL_MASKED",
+      isMaskedPayload: true,
+      sanitizationReport: report,
+      rawPrompt: lastUserMessage,
+      egressPayload: maskedResult.maskedText,
+      expectedPolicyVersion: outcome.policyVersion,
+    });
+    outboundUserText = maskedResult.maskedText;
+  } else {
+    // EXTERNAL_DIRECT or legacy SAFE
+    assertExternalEgressAllowed({
+      outcome,
+      route: outcome.route || "EXTERNAL_DIRECT",
+      rawPrompt: lastUserMessage,
+      egressPayload: sanitized.maskedText,
+      expectedPolicyVersion: outcome.policyVersion,
+    });
+    assertExternalSafeAllowed(outcome);
+    outboundUserText = sanitized.maskedText;
+  }
+
+  const outboundMessages: LlmMessage[] = messages.map((m, idx) => {
+    if (idx === messages.length - 1 - lastUserIndex) {
+      return { role: "user", content: outboundUserText };
+    }
+    if (m.role === "user") {
+      return {
+        role: "user",
+        content: sanitizePrompt(m.content, dictionaries).maskedText,
+      };
+    }
+    return { role: m.role, content: m.content };
+  });
 
   let completionTokens: number | undefined;
 
@@ -456,25 +604,31 @@ export async function POST(req: NextRequest) {
           userId,
           organizationId,
           action: "ALLOW",
-          score: decision.score,
-          reasons: decision.reasons,
-          matchedRuleIds: decision.matchedRules.map((r) => r.code),
+          score: decisionScore,
+          reasons: decisionReasons,
+          matchedRuleIds: decisionMatchedRuleIds,
           promptHash,
           promptPreview: maskPreview(sanitized.maskedText),
           promptLength: lastUserMessage.length,
-          latencyMs: Math.round(decision.latencyMs),
+          latencyMs: Math.round(decisionLatencyMs),
           engineVersion: PIPELINE_VERSION,
-          route: "EXTERNAL",
+          route: outcome.route ?? "EXTERNAL",
           maskCount: sanitized.totalCount,
           maskLabels: sanitized.findings,
-          isSensitive: classifier.isSensitive,
-          classifierCategory: classifier.category,
-          classifierRisk: classifier.riskLevel,
-          classifierReason: classifier.reason,
-          classifierLatencyMs: classifier.latencyMs,
+          isSensitive: false,
+          classifierCategory: null,
+          classifierRisk: "low",
+          classifierReason: outcome.reason ?? null,
+          classifierLatencyMs: outcome.processing.durationMs,
           sourceIp,
           promptTokens: estimateTokens(outboundMessages.map((m) => m.content).join("\n")),
           completionTokens: completionTokens ?? null,
+          sensitivity: outcome.sensitivity,
+          matchedConceptIds: outcome.matchedConcepts?.map((c) => c.conceptId) ?? [],
+          retrievalScores: outcome.matchedConcepts?.map((c) => ({ conceptId: c.conceptId, score: c.score })) ?? [],
+          classifierMethod: outcome.classifier?.method,
+          policyVersion: outcome.policyVersion,
+          pipelineHealth: outcome.pipelineHealth,
         }).catch(() => {
           // لاگ نباید جریان پاسخ کاربر را مختل کند
         });

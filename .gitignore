@@ -1,48 +1,45 @@
 # Dependencies
-/node_modules
-/.pnp
+node_modules/
+.pnp
 .pnp.js
-.yarn/cache
-.yarn/unplugged
+.pnp.*
+.yarn/cache/
+.yarn/unplugged/
 .yarn/build-state.yml
 .yarn/install-state.gz
-.pnp.*
 
-# Next.js Build & Output
-/.next/
-/out/
+# Next.js
 .next/
+out/
 
-# Production Build Artifacts
-/build
-/dist
+# Production build
+build/
+dist/
 
 # Bun
-.bun
+.bun/
 
-# SQLite Database & Prisma
-/db/*.db
-/db/*.db-journal
-/db/*.db-shm
-/db/*.db-wal
-*.sqlite
-*.sqlite3
-*.db
-*.db-journal
-*.db-shm
-*.db-wal
-!prisma/schema.prisma
-
-# Environment Variables
+# Environment variables
 .env
-.env*.local
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+.env.*.local
+
+# SQLite / local databases
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# Keep Prisma schema
+!prisma/schema.prisma
 
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -51,23 +48,25 @@ pnpm-debug.log*
 bun.log*
 lerna-debug.log*
 
-# Testing & Coverage
-/coverage
-/.nyc_output
+# Testing / Coverage
+coverage/
+.nyc_output/
 *.lcov
 
 # TypeScript
 *.tsbuildinfo
 next-env.d.ts
 
-# Temporary uploads & tool artifacts
-/upload/*
+# Temporary uploads & generated artifacts
+upload/*
 !upload/PROJECT_CONTEXT.md
-/download/*
-!download/README.md
-/tool-results/
 
-# Operating System Files
+uploads/
+download/*
+!download/README.md
+tool-results/
+
+# OS files
 .DS_Store
 .DS_Store?
 ._*
@@ -76,7 +75,7 @@ next-env.d.ts
 ehthumbs.db
 Thumbs.db
 
-# IDEs & Code Editors
+# IDEs / editors
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.json
@@ -87,9 +86,9 @@ Thumbs.db
 *.sublime-workspace
 *.sublime-project
 
-# uploaded files
-uploads/policy-docs/
-
-# other
+# Archives
 *.zip
+
+# Temporary phase/review documents
 phase*.md
+PHASE*.md

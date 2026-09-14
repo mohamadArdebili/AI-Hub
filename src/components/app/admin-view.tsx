@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { authFetch } from "@/lib/api-client";
 import { ThemeToggle } from "@/components/chat/theme-toggle";
@@ -24,16 +24,22 @@ import {
   Filter,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   X,
   Clock,
-  Zap,
   ShieldAlert,
-  ShieldCheck as ShieldOk,
   RefreshCw,
   BookKey,
   EyeOff,
   Server,
   Globe,
+  ScanSearch,
+  Send,
+  Undo2,
+  Archive,
+  Cpu,
+  RotateCcw,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -78,13 +84,21 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { Switch } from "@/components/ui/switch";
-import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 // ─── Types ──────────────────────────────────────────────────────────────
+
+type DocLifecycle = "DRAFT" | "REVIEW" | "ACTIVE" | "ARCHIVED";
+
+type RuleReviewStatus =
+  | "DRAFT"
+  | "REVIEW"
+  | "ACTIVE"
+  | "ARCHIVED"
+  | "REJECTED"
+  | "PENDING_LLM";
 
 interface PolicyDoc {
   id: string;
@@ -93,9 +107,77 @@ interface PolicyDoc {
   status: "PENDING" | "PROCESSING" | "READY" | "FAILED";
   version: number;
   isActive: boolean;
-  extractedCharCount?: number | null;
-  errorMessage?: string | null;
+  sourceType: "PDF" | "TXT" | "MD";
+  lifecycle: DocLifecycle;
+  hasCompiledRules: boolean;
+  reviewedAt: string | null;
+  activatedAt: string | null;
+  extractedCharCount: number | null;
+  errorMessage: string | null;
   createdAt: string;
+}
+
+interface PolicyDetailChunk {
+  id: string;
+  index: number;
+  pageIndex: number | null;
+  textHash: string | null;
+  spanStart: number | null;
+  spanEnd: number | null;
+  isCandidate: boolean;
+  isRestricted: boolean;
+  content: string;
+}
+
+interface PolicyDetailRule {
+  id: string;
+  code: string;
+  title: string;
+  status: RuleReviewStatus;
+  detectorType: "REGEX" | "CHECKSUM" | "DICTIONARY" | "SEMANTIC";
+  checksumKind: string | null;
+  action: "BLOCK_EXTERNAL" | "MASK" | "FLAG_REVIEW";
+  priority: number;
+  severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
+  category: string | null;
+  keywords: string[];
+  patterns: string[];
+  sourceQuote: string | null;
+  sourcePage: number | null;
+  textHash: string | null;
+  conflictGroup: string | null;
+  reviewNote: string | null;
+  chunkId: string | null;
+  isManual: boolean;
+  isActive: boolean;
+}
+
+interface PolicyDetail {
+  document: {
+    id: string;
+    filename: string;
+    sourceType: "PDF" | "TXT" | "MD";
+    status: "PENDING" | "PROCESSING" | "READY" | "FAILED";
+    lifecycle: DocLifecycle;
+    isActive: boolean;
+    version: number;
+    extractedCharCount: number | null;
+    errorMessage: string | null;
+    reviewedAt: string | null;
+    activatedAt: string | null;
+    createdAt: string;
+    hasCompiledRules: boolean;
+  };
+  chunks: PolicyDetailChunk[];
+  rules: PolicyDetailRule[];
+}
+
+interface LlmStatus {
+  enabled: boolean;
+  available: boolean;
+  reason?: "DISABLED_BY_ENV" | "UNREACHABLE" | "MODEL_NOT_FOUND" | "UNKNOWN";
+  model?: string;
+  baseUrl?: string;
 }
 
 interface PolicyRule {
@@ -150,10 +232,52 @@ interface MaskDictEntry {
 interface PolicyTestResult {
   pipelineVersion: string;
   latencyMs: number;
+  finalRoute?: "EXTERNAL_DIRECT" | "EXTERNAL_MASKED" | "LOCAL" | "BLOCKED" | "EXTERNAL";
+  route: "EXTERNAL_DIRECT" | "EXTERNAL_MASKED" | "LOCAL" | "BLOCKED" | "EXTERNAL";
+  routeFa: string;
+  pipelineHealth?: "HEALTHY" | "DEGRADED" | "FAILED";
+  policyVersion?: number;
   sanitize: {
     maskedText: string;
     maskCount: number;
     findings: Array<{ label: string; count: number; labelFa: string }>;
+  };
+  deterministicHits?: Array<{
+    detectorType: string;
+    category: string;
+    categoryFa: string;
+    matchedSpan: { start: number; end: number; text: string };
+    confidence: number;
+    ruleLabel?: string;
+  }>;
+  retrieval?: Array<{
+    conceptId: string;
+    conceptKey: string;
+    name: string;
+    sensitivity: string;
+    action: string;
+    score: number;
+    denseScore?: number;
+    lexicalScore?: number;
+    rrfScore?: number;
+  }>;
+  classifier?: {
+    decision?: string;
+    scope?: string;
+    confidence: number;
+    reasonFa: string;
+    method: string;
+    modelUsed?: string;
+    matchedConcepts?: string[];
+  } | null;
+  stageLatencies?: {
+    normalizationMs: number;
+    dlpMs: number;
+    retrievalMs: number;
+    classifierMs: number;
+    fusionMs: number;
+    decisionMs: number;
+    totalMs: number;
   };
   engine: {
     action: "ALLOW" | "BLOCK";
@@ -164,17 +288,16 @@ interface PolicyTestResult {
     engineVersion: string;
     hasActiveDocument: boolean;
   };
-  classifier: {
-    isSensitive: boolean;
-    category: string;
-    categoryFa: string;
-    riskLevel: string;
-    reason: string;
-    method: string;
-    latencyMs: number;
+  detection: {
+    decision: "SAFE" | "SENSITIVE" | "UNCERTAIN" | string;
+    decisionFa?: string;
+    action: "EXTERNAL_ALLOWED" | "LOCAL_ONLY" | string;
+    reason: string | null;
+    hitLabels: string[];
+    hitCount: number;
+    durationMs: number;
+    externalLlmInvoked?: false;
   } | null;
-  route: "EXTERNAL" | "LOCAL" | "BLOCKED";
-  routeFa: string;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
@@ -285,6 +408,159 @@ function getRiskBadge(risk?: string | null) {
     return <span className="text-xs text-muted-foreground">—</span>;
   }
   return getSeverityBadge(risk.toUpperCase());
+}
+
+function getLifecycleBadge(lifecycle: string) {
+  const map: Record<string, { label: string; className: string }> = {
+    DRAFT: {
+      label: "پیش‌نویس",
+      className:
+        "bg-gray-100 text-gray-600 dark:bg-gray-800/60 dark:text-gray-300",
+    },
+    REVIEW: {
+      label: "بازبینی",
+      className:
+        "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    },
+    ACTIVE: {
+      label: "فعال",
+      className:
+        "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    },
+    ARCHIVED: {
+      label: "بایگانی",
+      className: "bg-muted text-muted-foreground",
+    },
+  };
+  if (!lifecycle) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const info = map[lifecycle] || { label: lifecycle, className: "" };
+  return <Badge variant="secondary" className={info.className}>{info.label}</Badge>;
+}
+
+function getRuleStatusBadge(status: string) {
+  const map: Record<string, { label: string; className: string }> = {
+    DRAFT: {
+      label: "پیش‌نویس",
+      className:
+        "bg-gray-100 text-gray-600 dark:bg-gray-800/60 dark:text-gray-300",
+    },
+    REVIEW: {
+      label: "بازبینی",
+      className:
+        "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    },
+    ACTIVE: {
+      label: "فعال",
+      className:
+        "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    },
+    ARCHIVED: {
+      label: "بایگانی",
+      className: "bg-muted text-muted-foreground",
+    },
+    REJECTED: {
+      label: "ردشده",
+      className:
+        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    },
+    PENDING_LLM: {
+      label: "در انتظار LLM",
+      className:
+        "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
+    },
+  };
+  if (!status) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const info = map[status] || { label: status, className: "" };
+  return <Badge variant="secondary" className={info.className}>{info.label}</Badge>;
+}
+
+function getRuleActionBadge(action: string) {
+  const map: Record<string, { label: string; className: string }> = {
+    BLOCK_EXTERNAL: {
+      label: "مسدودسازی",
+      className:
+        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    },
+    MASK: {
+      label: "ماسک",
+      className:
+        "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+    },
+    FLAG_REVIEW: {
+      label: "برای بازبینی",
+      className:
+        "bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400",
+    },
+  };
+  if (!action) {
+    return <span className="text-xs text-muted-foreground">—</span>;
+  }
+  const info = map[action] || { label: action, className: "" };
+  return <Badge variant="secondary" className={info.className}>{info.label}</Badge>;
+}
+
+function getDetectionDecisionBadge(decision: string) {
+  const map: Record<string, { label: string; className: string }> = {
+    SAFE: {
+      label: "ایمن",
+      className:
+        "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
+    },
+    SENSITIVE: {
+      label: "حساس",
+      className:
+        "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400",
+    },
+    UNCERTAIN: {
+      label: "مبهم (fail-closed)",
+      className:
+        "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-400",
+    },
+  };
+  const info = map[decision] || { label: decision, className: "" };
+  return <Badge variant="secondary" className={info.className}>{info.label}</Badge>;
+}
+
+function getSourceTypeBadge(sourceType: string) {
+  return (
+    <Badge variant="outline" className="font-mono text-[10px] px-1.5">
+      {sourceType}
+    </Badge>
+  );
+}
+
+function getDetectorTypeBadge(detectorType: string, checksumKind?: string | null) {
+  return (
+    <Badge
+      variant="outline"
+      className="font-mono text-[10px] px-1.5"
+      title={
+        detectorType === "CHECKSUM" && checksumKind
+          ? `checksum: ${checksumKind}`
+          : undefined
+      }
+    >
+      {detectorType}
+    </Badge>
+  );
+}
+
+function translateLlmReason(reason?: LlmStatus["reason"]): string {
+  switch (reason) {
+    case "UNREACHABLE":
+      return "در دسترس نیست";
+    case "MODEL_NOT_FOUND":
+      return "مدل یافت نشد";
+    case "UNKNOWN":
+      return "نامشخص";
+    case "DISABLED_BY_ENV":
+    default:
+      return "غیرفعال (پیش‌فرض)";
+  }
 }
 
 const MASK_KIND_LABELS: Record<MaskDictEntry["kind"], string> = {
@@ -404,12 +680,90 @@ function AdminHeader() {
 // Tab 1: Policy Documents
 // ═══════════════════════════════════════════════════════════════════════════
 
+// ─── Local LLM Status Chip ──────────────────────────────────────────────
+
+function LlmStatusChip() {
+  const [status, setStatus] = useState<LlmStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetchStatus = useCallback(async () => {
+    try {
+      setLoading(true);
+      const res = await authFetch("/api/admin/policy/llm-status");
+      if (res.ok) {
+        setStatus(await res.json());
+      }
+    } catch {
+      // Status chip is informational — never surface an error toast.
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStatus();
+  }, [fetchStatus]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 rounded-lg border bg-muted/30 px-3 py-2">
+      <span className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
+        <Server className="size-3.5" />
+        مدل محلی:
+      </span>
+      {!status ? (
+        <Badge
+          variant="outline"
+          className="gap-1 bg-muted text-muted-foreground"
+        >
+          {loading ? "در حال بررسی…" : "نامشخص"}
+        </Badge>
+      ) : status.enabled && status.available ? (
+        <Badge
+          variant="secondary"
+          className="gap-1 bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+        >
+          <Cpu className="size-3" />
+          فعال{status.model ? ` — ${status.model}` : ""}
+        </Badge>
+      ) : status.enabled ? (
+        <Badge
+          variant="secondary"
+          className="gap-1 bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+        >
+          <AlertCircle className="size-3" />
+          {translateLlmReason(status.reason)}
+        </Badge>
+      ) : (
+        <Badge
+          variant="outline"
+          className="gap-1 bg-muted text-muted-foreground"
+        >
+          <Cpu className="size-3" />
+          غیرفعال (پیش‌فرض)
+        </Badge>
+      )}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="size-6 text-muted-foreground"
+        onClick={fetchStatus}
+        disabled={loading}
+        title="بررسی مجدد وضعیت مدل محلی"
+      >
+        <RefreshCw className={`size-3 ${loading ? "animate-spin" : ""}`} />
+      </Button>
+    </div>
+  );
+}
+
 function PolicyDocsTab() {
   const [docs, setDocs] = useState<PolicyDoc[]>([]);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+  const [expandedDocId, setExpandedDocId] = useState<string | null>(null);
+  const [transitioningId, setTransitioningId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchDocs = useCallback(async () => {
@@ -474,6 +828,7 @@ function PolicyDocsTab() {
   async function handleActivate(id: string) {
     try {
       setError(null);
+      setTransitioningId(id);
       const res = await authFetch(`/api/admin/policy/${id}/activate`, {
         method: "POST",
       });
@@ -481,11 +836,51 @@ function PolicyDocsTab() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || "خطا در فعال‌سازی");
       }
-      setSuccess("سند فعال شد");
+      const data = await res.json();
+      setSuccess(
+        `سند فعال شد — ${data.compiledRules} قاعده کامپایل شد`
+      );
       await fetchDocs();
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setTransitioningId(null);
     }
+  }
+
+  async function handleSetLifecycle(
+    id: string,
+    lifecycle: Exclude<DocLifecycle, "ACTIVE">
+  ) {
+    try {
+      setError(null);
+      setTransitioningId(id);
+      const res = await authFetch(`/api/admin/policy/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lifecycle }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در تغییر وضعیت سند");
+      }
+      setSuccess(
+        lifecycle === "REVIEW"
+          ? "سند به بازبینی ارسال شد"
+          : lifecycle === "DRAFT"
+            ? "سند به پیش‌نویس بازگشت"
+            : "سند بایگانی شد"
+      );
+      await fetchDocs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setTransitioningId(null);
+    }
+  }
+
+  function toggleExpand(id: string) {
+    setExpandedDocId((prev) => (prev === id ? null : id));
   }
 
   async function handleDelete(id: string) {
@@ -499,9 +894,33 @@ function PolicyDocsTab() {
         throw new Error(data.error || "خطا در حذف");
       }
       setSuccess("سند حذف شد");
+      setExpandedDocId((prev) => (prev === id ? null : prev));
       await fetchDocs();
     } catch (err) {
       setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    }
+  }
+
+  async function handleReprocess(id: string) {
+    try {
+      setError(null);
+      setTransitioningId(id);
+      const res = await authFetch(`/api/admin/policy/${id}/reprocess`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در پردازش مجدد");
+      }
+      const data = await res.json();
+      setSuccess(
+        `پردازش مجدد آغاز شد — ${data.deletedRules ?? 0} قاعده قدیمی حذف و سند با جدیدترین پایپ‌لاین دوباره استخراج می‌شود`
+      );
+      await fetchDocs();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setTransitioningId(null);
     }
   }
 
@@ -522,6 +941,9 @@ function PolicyDocsTab() {
         />
       )}
 
+      {/* Local LLM availability */}
+      <LlmStatusChip />
+
       {/* Upload Card */}
       <Card>
         <CardHeader className="pb-3">
@@ -534,15 +956,18 @@ function PolicyDocsTab() {
           <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
             <div className="flex-1">
               <Label htmlFor="pdf-upload" className="mb-1.5 block text-sm">
-                فایل PDF
+                فایل سند سیاست
               </Label>
               <Input
                 id="pdf-upload"
                 ref={fileInputRef}
                 type="file"
-                accept=".pdf"
+                accept=".pdf,.txt,.md"
                 className="dark:file:text-foreground"
               />
+              <p className="mt-1.5 text-xs text-muted-foreground">
+                PDF، TXT یا Markdown (حداکثر 10 مگابایت)
+              </p>
             </div>
             <Button
               onClick={handleUpload}
@@ -586,6 +1011,7 @@ function PolicyDocsTab() {
                       حجم
                     </TableHead>
                     <TableHead>وضعیت</TableHead>
+                    <TableHead>چرخه عمر</TableHead>
                     <TableHead className="hidden md:table-cell">
                       نسخه
                     </TableHead>
@@ -598,94 +1024,284 @@ function PolicyDocsTab() {
                 </TableHeader>
                 <TableBody>
                   {docs.map((doc) => (
-                    <TableRow key={doc.id}>
-                      <TableCell className="font-medium">
-                        <div className="flex items-center gap-2">
-                          <FileText className="size-4 shrink-0 text-muted-foreground" />
-                          <span className="max-w-[180px] truncate">
-                            {doc.filename}
-                          </span>
-                        </div>
-                        {doc.status === "FAILED" && doc.errorMessage && (
-                          <p className="mt-1 text-xs text-red-500 dark:text-red-400">
-                            {doc.errorMessage}
-                          </p>
-                        )}
-                      </TableCell>
-                      <TableCell className="hidden sm:table-cell">
-                        {formatFileSize(doc.size)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1.5">
-                          {getStatusBadge(doc.status)}
-                          {(doc.status === "PENDING" ||
-                            doc.status === "PROCESSING") && (
-                            <Spinner className="size-3" />
+                    <Fragment key={doc.id}>
+                      <TableRow className="align-top">
+                        <TableCell className="font-medium">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <FileText className="size-4 shrink-0 text-muted-foreground" />
+                            <span className="max-w-[180px] truncate">
+                              {doc.filename}
+                            </span>
+                            {getSourceTypeBadge(doc.sourceType)}
+                          </div>
+                          {doc.status === "FAILED" && doc.errorMessage && (
+                            <p className="mt-1 text-xs text-red-500 dark:text-red-400">
+                              {doc.errorMessage}
+                            </p>
                           )}
-                        </div>
-                      </TableCell>
-                      <TableCell className="hidden md:table-cell">
-                        v{doc.version}
-                      </TableCell>
-                      <TableCell>
-                        {doc.isActive ? (
-                          <CheckCircle2 className="size-4 text-green-500" />
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </TableCell>
-                      <TableCell className="hidden lg:table-cell text-muted-foreground">
-                        {formatDate(doc.createdAt)}
-                      </TableCell>
-                      <TableCell>
-                        <div className="flex items-center gap-1">
-                          {doc.status === "READY" && !doc.isActive && (
+                        </TableCell>
+                        <TableCell className="hidden sm:table-cell">
+                          {formatFileSize(doc.size)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-1.5">
+                            {getStatusBadge(doc.status)}
+                            {(doc.status === "PENDING" ||
+                              doc.status === "PROCESSING") && (
+                              <Spinner className="size-3" />
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            {getLifecycleBadge(doc.lifecycle)}
+                            {doc.hasCompiledRules && (
+                              <Badge
+                                variant="outline"
+                                className="font-mono text-[10px] px-1.5 text-muted-foreground"
+                              >
+                                کامپایل‌شده
+                              </Badge>
+                            )}
+                          </div>
+                        </TableCell>
+                        <TableCell className="hidden md:table-cell">
+                          v{doc.version}
+                        </TableCell>
+                        <TableCell>
+                          {doc.isActive ? (
+                            <CheckCircle2 className="size-4 text-green-500" />
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="hidden lg:table-cell text-muted-foreground">
+                          {formatDate(doc.createdAt)}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex flex-wrap items-center gap-1">
                             <Button
                               size="sm"
-                              variant="outline"
+                              variant="ghost"
                               className="h-7 gap-1 text-xs"
-                              onClick={() => handleActivate(doc.id)}
+                              onClick={() => toggleExpand(doc.id)}
+                              title="جزئیات سند، تکه‌ها و قواعد"
                             >
-                              <CheckCircle2 className="size-3" />
-                              فعال‌سازی
+                              {expandedDocId === doc.id ? (
+                                <ChevronUp className="size-3" />
+                              ) : (
+                                <ChevronDown className="size-3" />
+                              )}
+                              جزئیات
                             </Button>
-                          )}
-                          <AlertDialog>
-                            <AlertDialogTrigger asChild>
-                              <Button
-                                size="sm"
-                                variant="ghost"
-                                className="h-7 gap-1 text-xs text-destructive hover:text-destructive"
-                              >
-                                <Trash2 className="size-3" />
-                              </Button>
-                            </AlertDialogTrigger>
-                            <AlertDialogContent>
-                              <AlertDialogHeader>
-                                <AlertDialogTitle>
-                                  حذف سند
-                                </AlertDialogTitle>
-                                <AlertDialogDescription>
-                                  آیا از حذف سند «{doc.filename}» مطمئن هستید؟
-                                  این عمل غیرقابل بازگشت است.
-                                </AlertDialogDescription>
-                              </AlertDialogHeader>
-                              <AlertDialogFooter>
-                                <AlertDialogCancel>
-                                  انصراف
-                                </AlertDialogCancel>
-                                <AlertDialogAction
-                                  className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                                  onClick={() => handleDelete(doc.id)}
+                            {doc.status === "READY" &&
+                              doc.lifecycle === "DRAFT" && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  className="h-7 gap-1 text-xs"
+                                  disabled={transitioningId === doc.id}
+                                  onClick={() =>
+                                    handleSetLifecycle(doc.id, "REVIEW")
+                                  }
                                 >
-                                  حذف
-                                </AlertDialogAction>
-                              </AlertDialogFooter>
-                            </AlertDialogContent>
-                          </AlertDialog>
-                        </div>
-                      </TableCell>
-                    </TableRow>
+                                  {transitioningId === doc.id ? (
+                                    <Spinner className="size-3" />
+                                  ) : (
+                                    <Send className="size-3" />
+                                  )}
+                                  ارسال به بازبینی
+                                </Button>
+                              )}
+                            {doc.lifecycle === "REVIEW" && (
+                              <>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 gap-1 text-xs text-muted-foreground"
+                                  disabled={transitioningId === doc.id}
+                                  onClick={() =>
+                                    handleSetLifecycle(doc.id, "DRAFT")
+                                  }
+                                >
+                                  <Undo2 className="size-3" />
+                                  بازگشت به پیش‌نویس
+                                </Button>
+                                <AlertDialog>
+                                  <AlertDialogTrigger asChild>
+                                    <Button
+                                      size="sm"
+                                      className="h-7 gap-1 text-xs"
+                                      disabled={transitioningId === doc.id}
+                                    >
+                                      {transitioningId === doc.id ? (
+                                        <Spinner className="size-3" />
+                                      ) : (
+                                        <CheckCircle2 className="size-3" />
+                                      )}
+                                      فعال‌سازی
+                                    </Button>
+                                  </AlertDialogTrigger>
+                                  <AlertDialogContent>
+                                    <AlertDialogHeader>
+                                      <AlertDialogTitle>
+                                        فعال‌سازی سند
+                                      </AlertDialogTitle>
+                                      <AlertDialogDescription>
+                                        با فعال‌سازی، سند فعال قبلی بایگانی
+                                        می‌شود و قواعد این سند کامپایل و وارد
+                                        موتور سیاست می‌شوند. ادامه می‌دهید؟
+                                      </AlertDialogDescription>
+                                    </AlertDialogHeader>
+                                    <AlertDialogFooter>
+                                      <AlertDialogCancel>انصراف</AlertDialogCancel>
+                                      <AlertDialogAction
+                                        onClick={() => handleActivate(doc.id)}
+                                      >
+                                        فعال‌سازی
+                                      </AlertDialogAction>
+                                    </AlertDialogFooter>
+                                  </AlertDialogContent>
+                                </AlertDialog>
+                              </>
+                            )}
+                            {doc.lifecycle === "ACTIVE" && (
+                              <AlertDialog>
+                                <AlertDialogTrigger asChild>
+                                  <Button
+                                    size="sm"
+                                    variant="outline"
+                                    className="h-7 gap-1 text-xs"
+                                    disabled={transitioningId === doc.id}
+                                  >
+                                    {transitioningId === doc.id ? (
+                                      <Spinner className="size-3" />
+                                    ) : (
+                                      <Archive className="size-3" />
+                                    )}
+                                    بایگانی
+                                  </Button>
+                                </AlertDialogTrigger>
+                                <AlertDialogContent>
+                                  <AlertDialogHeader>
+                                    <AlertDialogTitle>
+                                      بایگانی سند
+                                    </AlertDialogTitle>
+                                    <AlertDialogDescription>
+                                      آیا از بایگانی سند «{doc.filename}»
+                                      مطمئن هستید؟ سند از چرخه فعال خارج
+                                      می‌شود.
+                                    </AlertDialogDescription>
+                                  </AlertDialogHeader>
+                                  <AlertDialogFooter>
+                                    <AlertDialogCancel>انصراف</AlertDialogCancel>
+                                    <AlertDialogAction
+                                      onClick={() =>
+                                        handleSetLifecycle(doc.id, "ARCHIVED")
+                                      }
+                                    >
+                                      بایگانی
+                                    </AlertDialogAction>
+                                  </AlertDialogFooter>
+                                </AlertDialogContent>
+                              </AlertDialog>
+                            )}
+                            {doc.status === "READY" && (
+                              <AlertDialog>
+                                <AlertDialogTrigger asChild>
+                                  <Button
+                                    size="sm"
+                                    variant="ghost"
+                                    className="h-7 gap-1 text-xs text-muted-foreground"
+                                    disabled={transitioningId === doc.id}
+                                    title="استخراج مجدد متن و قواعد با جدیدترین پایپ‌لاین (تعمیر متن فارسی + قواعد ساختارآگوی + مدل محلی)"
+                                  >
+                                    {transitioningId === doc.id ? (
+                                      <Spinner className="size-3" />
+                                    ) : (
+                                      <RotateCcw className="size-3" />
+                                    )}
+                                    پردازش مجدد
+                                  </Button>
+                                </AlertDialogTrigger>
+                                <AlertDialogContent>
+                                  <AlertDialogHeader>
+                                    <AlertDialogTitle>
+                                      پردازش مجدد سند
+                                    </AlertDialogTitle>
+                                    <AlertDialogDescription>
+                                      متن و قواعد «{doc.filename}» با
+                                      جدیدترین پایپ‌لاین (تعمیر متن فارسی،
+                                      استخراج قواعد بر اساس سرصفحه‌های
+                                      «قاعده»، مدل محلی) از نو استخراج
+                                      می‌شوند. تکه‌ها و قواعد خودکار فعلیِ
+                                      این سند حذف و بازسازی می‌شوند؛ سند به
+                                      وضعیت پیش‌نویس بازمی‌گردد تا پس از
+                                      بازبینی دوباره فعال شود.
+                                    </AlertDialogDescription>
+                                  </AlertDialogHeader>
+                                  <AlertDialogFooter>
+                                    <AlertDialogCancel>
+                                      انصراف
+                                    </AlertDialogCancel>
+                                    <AlertDialogAction
+                                      onClick={() => handleReprocess(doc.id)}
+                                    >
+                                      پردازش مجدد
+                                    </AlertDialogAction>
+                                  </AlertDialogFooter>
+                                </AlertDialogContent>
+                              </AlertDialog>
+                            )}
+                            <AlertDialog>
+                              <AlertDialogTrigger asChild>
+                                <Button
+                                  size="sm"
+                                  variant="ghost"
+                                  className="h-7 gap-1 text-xs text-destructive hover:text-destructive"
+                                >
+                                  <Trash2 className="size-3" />
+                                </Button>
+                              </AlertDialogTrigger>
+                              <AlertDialogContent>
+                                <AlertDialogHeader>
+                                  <AlertDialogTitle>
+                                    حذف سند
+                                  </AlertDialogTitle>
+                                  <AlertDialogDescription>
+                                    آیا از حذف سند «{doc.filename}» مطمئن هستید؟
+                                    این عمل غیرقابل بازگشت است.
+                                  </AlertDialogDescription>
+                                </AlertDialogHeader>
+                                <AlertDialogFooter>
+                                  <AlertDialogCancel>
+                                    انصراف
+                                  </AlertDialogCancel>
+                                  <AlertDialogAction
+                                    className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                                    onClick={() => handleDelete(doc.id)}
+                                  >
+                                    حذف
+                                  </AlertDialogAction>
+                                </AlertDialogFooter>
+                              </AlertDialogContent>
+                            </AlertDialog>
+                          </div>
+                        </TableCell>
+                      </TableRow>
+                      {expandedDocId === doc.id && (
+                        <TableRow className="hover:bg-transparent">
+                          <TableCell colSpan={8} className="bg-muted/20 p-0">
+                            <div className="border-b border-border/60 p-4">
+                              <DocumentDetail
+                                docId={doc.id}
+                                onChanged={fetchDocs}
+                              />
+                            </div>
+                          </TableCell>
+                        </TableRow>
+                      )}
+                    </Fragment>
                   ))}
                 </TableBody>
               </Table>
@@ -697,9 +1313,289 @@ function PolicyDocsTab() {
   );
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ─── Expandable Document Detail (chunks + rule provenance review) ───────
+
+function DocumentDetail({
+  docId,
+  onChanged,
+}: {
+  docId: string;
+  onChanged: () => void;
+}) {
+  const [detail, setDetail] = useState<PolicyDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [busyRuleId, setBusyRuleId] = useState<string | null>(null);
+
+  const fetchDetail = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      const res = await authFetch(`/api/admin/policy/${docId}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در دریافت جزئیات سند");
+      }
+      setDetail(await res.json());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setLoading(false);
+    }
+  }, [docId]);
+
+  useEffect(() => {
+    fetchDetail();
+  }, [fetchDetail]);
+
+  async function handleReviewRule(ruleId: string, action: "ACCEPT" | "REJECT") {
+    try {
+      setBusyRuleId(ruleId);
+      setError(null);
+      const res = await authFetch(`/api/admin/rules/${ruleId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewAction: action }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در بررسی قاعده");
+      }
+      await fetchDetail();
+      onChanged();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "خطای ناشناخته");
+    } finally {
+      setBusyRuleId(null);
+    }
+  }
+
+  if (loading) {
+    return (
+      <div className="space-y-3 py-2">
+        <Skeleton className="h-8 w-full" />
+        <Skeleton className="h-20 w-full" />
+        <Skeleton className="h-20 w-full" />
+      </div>
+    );
+  }
+
+  if (error && !detail) {
+    return (
+      <div className="space-y-3 py-2">
+        <Alert variant="destructive">
+          <AlertCircle className="size-4" />
+          <AlertDescription className="flex items-center justify-between gap-2">
+            <span>{error}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 shrink-0 gap-1 text-xs"
+              onClick={fetchDetail}
+            >
+              <RefreshCw className="size-3" />
+              تلاش مجدد
+            </Button>
+          </AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  if (!detail) return null;
+
+  const docInfo = detail.document;
+
+  return (
+    <div className="space-y-4">
+      {/* Document summary */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        <span className="font-medium text-foreground">{docInfo.filename}</span>
+        {getSourceTypeBadge(docInfo.sourceType)}
+        {getLifecycleBadge(docInfo.lifecycle)}
+        <span>نسخه v{docInfo.version}</span>
+        {docInfo.extractedCharCount != null && (
+          <span>
+            {docInfo.extractedCharCount.toLocaleString("fa-IR")} کاراکتر
+            استخراج‌شده
+          </span>
+        )}
+        {docInfo.reviewedAt && (
+          <span>بازبینی: {formatDate(docInfo.reviewedAt)}</span>
+        )}
+        {docInfo.activatedAt && (
+          <span>فعال‌سازی: {formatDate(docInfo.activatedAt)}</span>
+        )}
+      </div>
+
+      {error && (
+        <Alert variant="destructive">
+          <AlertCircle className="size-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
+
+      {/* Chunks */}
+      <div>
+        <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
+          <FileText className="size-3.5 text-muted-foreground" />
+          تکه‌های سند ({detail.chunks.length})
+        </h4>
+        {detail.chunks.length === 0 ? (
+          <p className="rounded-md border bg-muted/30 p-4 text-center text-xs text-muted-foreground">
+            تکه‌ای برای این سند ثبت نشده است
+          </p>
+        ) : (
+          <ScrollArea className="max-h-[360px] rounded-md border">
+            <div className="divide-y">
+              {detail.chunks.map((chunk) => (
+                <div key={chunk.id} className="space-y-1.5 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs font-medium">
+                      تکه #{chunk.index + 1}
+                    </span>
+                    <span className="text-xs text-muted-foreground">
+                      {chunk.pageIndex != null
+                        ? `صفحهٔ ${chunk.pageIndex}`
+                        : "—"}
+                    </span>
+                    {chunk.isCandidate && (
+                      <Badge
+                        variant="secondary"
+                        className="bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                      >
+                        کاندید قاعده
+                      </Badge>
+                    )}
+                    {chunk.isRestricted && (
+                      <Badge
+                        variant="secondary"
+                        className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      >
+                        محدود
+                      </Badge>
+                    )}
+                    {chunk.textHash && (
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {chunk.textHash.slice(0, 8)}
+                      </span>
+                    )}
+                  </div>
+                  <p
+                    className="line-clamp-2 text-xs leading-relaxed text-muted-foreground"
+                    title={chunk.content}
+                  >
+                    {chunk.content}
+                  </p>
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
+      </div>
+
+      {/* Rules with provenance + review actions */}
+      <div>
+        <h4 className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
+          <ShieldCheck className="size-3.5 text-muted-foreground" />
+          قواعد استخراج‌شده ({detail.rules.length})
+        </h4>
+        {detail.rules.length === 0 ? (
+          <p className="rounded-md border bg-muted/30 p-4 text-center text-xs text-muted-foreground">
+            قاعده‌ای برای این سند استخراج نشده است
+          </p>
+        ) : (
+          <ScrollArea className="max-h-[420px] rounded-md border">
+            <div className="divide-y">
+              {detail.rules.map((rule) => (
+                <div key={rule.id} className="space-y-2 p-3">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-mono text-xs font-medium">
+                      {rule.code}
+                    </span>
+                    <span className="text-sm font-medium">{rule.title}</span>
+                    {getRuleStatusBadge(rule.status)}
+                    {getSeverityBadge(rule.severity)}
+                    {getDetectorTypeBadge(rule.detectorType, rule.checksumKind)}
+                    {getRuleActionBadge(rule.action)}
+                    <span className="text-xs text-muted-foreground">
+                      اولویت: {rule.priority}
+                    </span>
+                    {rule.sourcePage != null && (
+                      <span className="text-xs text-muted-foreground">
+                        ص {rule.sourcePage}
+                      </span>
+                    )}
+                    {rule.conflictGroup && (
+                      <Badge
+                        variant="secondary"
+                        className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
+                      >
+                        تعارض
+                      </Badge>
+                    )}
+                  </div>
+                  {rule.category && (
+                    <p className="text-xs text-muted-foreground">
+                      دسته‌بندی: {rule.category}
+                    </p>
+                  )}
+                  {rule.reviewNote && (
+                    <p className="text-xs text-muted-foreground">
+                      یادداشت بازبینی: {rule.reviewNote}
+                    </p>
+                  )}
+                  {rule.sourceQuote && (
+                    <div className="rounded-md border bg-muted/40 p-2">
+                      <p className="mb-1 text-[11px] text-muted-foreground">
+                        متن مبدأ:
+                      </p>
+                      <p className="text-xs leading-relaxed">
+                        «{rule.sourceQuote}»
+                      </p>
+                    </div>
+                  )}
+                  {(rule.status === "DRAFT" ||
+                    rule.status === "PENDING_LLM") && (
+                    <div className="flex items-center gap-1.5">
+                      <Button
+                        size="sm"
+                        className="h-7 gap-1 bg-emerald-600 text-xs text-white hover:bg-emerald-700"
+                        disabled={busyRuleId === rule.id}
+                        onClick={() => handleReviewRule(rule.id, "ACCEPT")}
+                      >
+                        {busyRuleId === rule.id ? (
+                          <Spinner className="size-3" />
+                        ) : (
+                          <CheckCircle2 className="size-3" />
+                        )}
+                        تأیید
+                      </Button>
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="h-7 gap-1 border-red-300 text-xs text-red-600 hover:bg-red-50 dark:border-red-800 dark:text-red-400 dark:hover:bg-red-950/40"
+                        disabled={busyRuleId === rule.id}
+                        onClick={() => handleReviewRule(rule.id, "REJECT")}
+                      >
+                        <X className="size-3" />
+                        رد
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </ScrollArea>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // Tab 2: Rules Editor
-// ═══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
 
 interface RuleFormData {
   code: string;
@@ -1605,24 +2501,38 @@ function PolicyTesterTab() {
           {/* Final route */}
           <Card
             className={
-              result.route === "EXTERNAL"
+              result.route === "EXTERNAL" || result.route === "EXTERNAL_DIRECT"
                 ? "border-emerald-200 bg-emerald-50/50 dark:border-emerald-800 dark:bg-emerald-950/20"
-                : result.route === "LOCAL"
-                  ? "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20"
-                  : "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20"
+                : result.route === "EXTERNAL_MASKED"
+                  ? "border-sky-200 bg-sky-50/50 dark:border-sky-800 dark:bg-sky-950/20"
+                  : result.route === "LOCAL"
+                    ? "border-amber-200 bg-amber-50/50 dark:border-amber-800 dark:bg-amber-950/20"
+                    : "border-red-200 bg-red-50/50 dark:border-red-800 dark:bg-red-950/20"
             }
           >
             <CardContent className="py-4">
               <div className="flex items-center gap-3">
-                {result.route === "EXTERNAL" ? (
+                {result.route === "EXTERNAL" || result.route === "EXTERNAL_DIRECT" ? (
                   <>
                     <Globe className="size-8 text-emerald-600 dark:text-emerald-400" />
                     <div>
                       <p className="text-lg font-bold text-emerald-700 dark:text-emerald-400">
-                        مسیر: مدل خارجی
+                        مسیر: مدل خارجی (مستقیم)
                       </p>
                       <p className="text-sm text-emerald-600/80 dark:text-emerald-500/80">
-                        نسخه ماسک‌شدهٔ پرامپت به سرویس بیرونی ارسال می‌شود
+                        پرامپت عمومی و ایمن ارزیابی شد — بدون داده حساس سازمانی به سرویس بیرونی ارسال می‌شود
+                      </p>
+                    </div>
+                  </>
+                ) : result.route === "EXTERNAL_MASKED" ? (
+                  <>
+                    <ShieldCheck className="size-8 text-sky-600 dark:text-sky-400" />
+                    <div>
+                      <p className="text-lg font-bold text-sky-700 dark:text-sky-400">
+                        مسیر: مدل خارجی (ماسک‌شده)
+                      </p>
+                      <p className="text-sm text-sky-600/80 dark:text-sky-500/80">
+                        طبق سیاست سازمان، پس از ماسک‌گذاری کامل هویت‌ها و داده‌های حساس، نسخهٔ امن به سرویس بیرونی ارسال می‌شود
                       </p>
                     </div>
                   </>
@@ -1631,10 +2541,10 @@ function PolicyTesterTab() {
                     <Server className="size-8 text-amber-600 dark:text-amber-400" />
                     <div>
                       <p className="text-lg font-bold text-amber-700 dark:text-amber-400">
-                        مسیر: مدل محلی
+                        مسیر: مدل محلی / امن داخل سازمان
                       </p>
                       <p className="text-sm text-amber-600/80 dark:text-amber-500/80">
-                        داده حساس شناسایی شد — بدون ارسال به سرویس بیرونی
+                        داده حساس سازمانی یا عدم قطعیت در پایپ‌لاین تشخیص — بدون خروج از مرز سازمان (Fail-Closed)
                       </p>
                     </div>
                   </>
@@ -1643,10 +2553,10 @@ function PolicyTesterTab() {
                     <ShieldAlert className="size-8 text-red-600 dark:text-red-400" />
                     <div>
                       <p className="text-lg font-bold text-red-700 dark:text-red-400">
-                        متوقف شد
+                        مسدودسازی امنیتی (BLOCKED)
                       </p>
                       <p className="text-sm text-red-600/80 dark:text-red-500/80">
-                        تخلف بحرانی از سیاست امنیتی — درخواست ارسال نشد
+                        تخلف بحرانی از خطوط قرمز امنیت اطلاعات — درخواست بلافاصله متوقف گردید
                       </p>
                     </div>
                   </>
@@ -1654,6 +2564,46 @@ function PolicyTesterTab() {
               </div>
             </CardContent>
           </Card>
+
+          {/* Latency breakdown */}
+          {result.stageLatencies && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <Clock className="size-4" />
+                  زمان‌سنجی تفکیکی مراحل پایپ‌لاین تشخیص
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                <div className="grid grid-cols-2 gap-2 text-xs sm:grid-cols-6">
+                  <div className="rounded border bg-muted/30 p-2 text-center">
+                    <div className="text-[10px] text-muted-foreground">نرمال‌سازی</div>
+                    <div className="font-mono font-bold">{result.stageLatencies.normalizationMs}ms</div>
+                  </div>
+                  <div className="rounded border bg-muted/30 p-2 text-center">
+                    <div className="text-[10px] text-muted-foreground">تشخیص DLP</div>
+                    <div className="font-mono font-bold">{result.stageLatencies.dlpMs}ms</div>
+                  </div>
+                  <div className="rounded border bg-muted/30 p-2 text-center">
+                    <div className="text-[10px] text-muted-foreground">بازیابی هیبریدی</div>
+                    <div className="font-mono font-bold">{result.stageLatencies.retrievalMs}ms</div>
+                  </div>
+                  <div className="rounded border bg-muted/30 p-2 text-center">
+                    <div className="text-[10px] text-muted-foreground">قاضی معنایی</div>
+                    <div className="font-mono font-bold">{result.stageLatencies.classifierMs}ms</div>
+                  </div>
+                  <div className="rounded border bg-muted/30 p-2 text-center">
+                    <div className="text-[10px] text-muted-foreground">تصمیم و ادغام</div>
+                    <div className="font-mono font-bold">{result.stageLatencies.decisionMs}ms</div>
+                  </div>
+                  <div className="rounded border bg-primary/10 p-2 text-center">
+                    <div className="text-[10px] text-muted-foreground">مجموع کل</div>
+                    <div className="font-mono font-bold text-primary">{result.stageLatencies.totalMs}ms</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
 
           {/* Pipeline layer 1: Sanitizer */}
           <Card>
@@ -1683,7 +2633,7 @@ function PolicyTesterTab() {
               )}
               <div className="rounded-md border bg-muted/40 p-3">
                 <p className="mb-1 text-[11px] text-muted-foreground">
-                  متن ماسک‌شده (همین نسخه به مدل می‌رود):
+                  متن ماسک‌شده (همین نسخه به مدل بیرونی ارسال می‌شود):
                 </p>
                 <p
                   className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed"
@@ -1695,88 +2645,132 @@ function PolicyTesterTab() {
             </CardContent>
           </Card>
 
-          {/* Pipeline layer 2: Engine */}
+          {/* Pipeline layer 2: Deterministic sensitive-data detection */}
           <Card>
             <CardHeader className="pb-2">
               <CardTitle className="flex items-center gap-2 text-sm">
-                <ShieldCheck className="size-4" />
-                لایه ۲ — موتور قواعد (فاز ۲)
+                <ScanSearch className="size-4" />
+                لایه ۲ — تشخیص قطعی و الگوهای DLP
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-2">
-              <div className="flex items-center gap-2">
-                {result.engine.action === "ALLOW" ? (
-                  <Badge
-                    variant="secondary"
-                    className="bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400"
-                  >
-                    عبور
-                  </Badge>
-                ) : (
-                  <Badge
-                    variant="secondary"
-                    className="bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400"
-                  >
-                    مسدود
-                  </Badge>
-                )}
-                <span className="text-xs text-muted-foreground">
-                  امتیاز: {result.engine.score.toFixed(2)} · {result.engine.latencyMs}ms
-                </span>
-              </div>
-              {!result.engine.hasActiveDocument && (
-                <p className="text-xs text-orange-600 dark:text-orange-400">
-                  هیچ سند سیاست فعالی وجود ندارد (حالت fail-closed)
-                </p>
-              )}
-              {result.engine.reasons.length > 0 && (
-                <ul className="space-y-1">
-                  {result.engine.reasons.map((reason, i) => (
-                    <li
+              {result.deterministicHits && result.deterministicHits.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {result.deterministicHits.map((h, i) => (
+                    <Badge
                       key={i}
-                      className="flex items-start gap-2 text-xs text-muted-foreground"
+                      variant="outline"
+                      className="border-red-300 bg-red-50 text-red-800 dark:border-red-800 dark:bg-red-950/30 dark:text-red-300"
                     >
-                      <span className="mt-1 size-1.5 shrink-0 rounded-full bg-red-400" />
-                      {reason}
-                    </li>
+                      {h.categoryFa}: {h.matchedSpan.text} (اطمینان {Math.round(h.confidence * 100)}٪)
+                    </Badge>
                   ))}
-                </ul>
+                </div>
+              ) : (
+                <p className="text-xs text-muted-foreground">
+                  هیچ تخلف یا دیتکتور قطعی (کارت بانکی، کد ملی، کلید خصوصی، regex) کشف نشد.
+                </p>
               )}
             </CardContent>
           </Card>
 
-          {/* Pipeline layer 3: Classifier */}
-          <Card>
-            <CardHeader className="pb-2">
-              <CardTitle className="flex items-center gap-2 text-sm">
-                <Zap className="size-4" />
-                لایه ۳ — طبقه‌بند هوشمند
-              </CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {result.classifier ? (
-                <>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {getRiskBadge(result.classifier.riskLevel)}
-                    <Badge variant="outline">{result.classifier.categoryFa}</Badge>
-                    <Badge variant="outline" className="font-mono text-[10px]">
-                      {result.classifier.method === "llm" ? "LLM" : "هیوریستیک"}
+          {/* Pipeline layer 3: Hybrid Concept Retrieval */}
+          {result.retrieval && result.retrieval.length > 0 && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <Cpu className="size-4" />
+                  لایه ۳ — مفاهیم مرتبط بازیابی‌شده (Hybrid Retrieval)
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <div className="space-y-1.5">
+                  {result.retrieval.map((c, i) => (
+                    <div
+                      key={i}
+                      className="flex flex-wrap items-center justify-between gap-2 rounded border bg-muted/20 p-2 text-xs"
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold">{c.name}</span>
+                        <Badge variant="outline" className="font-mono text-[10px]">
+                          {c.conceptKey}
+                        </Badge>
+                        <Badge
+                          variant="secondary"
+                          className={
+                            c.sensitivity === "HIGHLY_CONFIDENTIAL"
+                              ? "bg-red-100 text-red-800 dark:bg-red-900/30 dark:text-red-400"
+                              : c.sensitivity === "CONFIDENTIAL"
+                                ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+                                : "bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-400"
+                          }
+                        >
+                          {c.sensitivity}
+                        </Badge>
+                        <Badge variant="outline" className="text-[10px]">
+                          {c.action}
+                        </Badge>
+                      </div>
+                      <div className="font-mono text-[11px] text-muted-foreground">
+                        {c.denseScore !== undefined && `Dense: ${c.denseScore.toFixed(3)} | `}
+                        {c.lexicalScore !== undefined && `BM25: ${c.lexicalScore.toFixed(2)} | `}
+                        امتیاز: {c.score.toFixed(3)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Pipeline layer 4: Local LLM Semantic Classifier */}
+          {result.classifier && (
+            <Card>
+              <CardHeader className="pb-2">
+                <CardTitle className="flex items-center gap-2 text-sm">
+                  <ShieldCheck className="size-4" />
+                  لایه ۴ — قضاوت معنایی هوش مصنوعی محلی (Semantic Judge)
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge
+                    variant="secondary"
+                    className={
+                      result.classifier.decision === "SAFE"
+                        ? "bg-emerald-100 text-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-400"
+                        : result.classifier.decision === "SENSITIVE"
+                          ? "bg-amber-100 text-amber-800 dark:bg-amber-900/30 dark:text-amber-400"
+                          : "bg-orange-100 text-orange-800 dark:bg-orange-900/30 dark:text-orange-400"
+                    }
+                  >
+                    تصمیم: {result.classifier.decision}
+                  </Badge>
+                  {result.classifier.scope && (
+                    <Badge variant="outline" className="text-[10px]">
+                      دامنه: {result.classifier.scope}
                     </Badge>
-                    <span className="text-xs text-muted-foreground">
-                      {result.classifier.latencyMs}ms
-                    </span>
-                  </div>
+                  )}
+                  <Badge variant="outline" className="font-mono text-[10px]">
+                    اطمینان: {Math.round(result.classifier.confidence * 100)}٪
+                  </Badge>
+                  <Badge variant="outline" className="font-mono text-[10px]">
+                    روش: {result.classifier.method}
+                  </Badge>
+                  {result.classifier.modelUsed && (
+                    <Badge variant="outline" className="font-mono text-[10px]">
+                      مدل: {result.classifier.modelUsed}
+                    </Badge>
+                  )}
+                </div>
+                {result.classifier.reasonFa && (
                   <p className="text-xs leading-relaxed text-muted-foreground">
-                    {result.classifier.reason}
+                    استدلال: {result.classifier.reasonFa}
                   </p>
-                </>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  اجرا نشد (موتور قواعد پرامپت را مسدود کرد)
-                </p>
-              )}
-            </CardContent>
-          </Card>
+                )}
+              </CardContent>
+            </Card>
+          )}
 
           <p className="text-center text-xs text-muted-foreground">
             زمان کل پایپ‌لاین: {result.latencyMs}ms · نسخه: {result.pipelineVersion}
@@ -2063,6 +3057,292 @@ function MaskDictionaryTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Policy Concepts Tab (Phase 2: Semantic Governance & Provenance Review)
+// ═══════════════════════════════════════════════════════════════════════════
+
+interface ConceptItem {
+  id: string;
+  conceptKey: string;
+  name: string;
+  nameFa?: string | null;
+  descriptionFa: string;
+  category?: string | null;
+  sensitivity: "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "HIGHLY_CONFIDENTIAL";
+  action: "ALLOW_EXTERNAL" | "ROUTE_LOCAL" | "MASK_AND_ALLOW_EXTERNAL" | "BLOCK";
+  reviewStatus: "DRAFT" | "REVIEW" | "ACTIVE" | "ARCHIVED" | "REJECTED";
+  sourceQuote: string;
+  sourcePage?: number | null;
+  positiveExamples: string[];
+  negativeExamples: string[];
+  conditions: string[];
+  keywords: string[];
+  reviewNote?: string | null;
+  extractedByModel?: string | null;
+  createdAt?: string;
+}
+
+function PolicyConceptsTab() {
+  const [concepts, setConcepts] = useState<ConceptItem[]>([]);
+  const [stats, setStats] = useState({ total: 0, active: 0, review: 0, rejected: 0, archived: 0 });
+  const [loading, setLoading] = useState(true);
+  const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [actionLoading, setActionLoading] = useState<string | null>(null);
+
+  const fetchConcepts = useCallback(async () => {
+    try {
+      setLoading(true);
+      const url = statusFilter !== "ALL" ? `/api/admin/concepts?reviewStatus=${statusFilter}` : "/api/admin/concepts";
+      const res = await authFetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        setConcepts(data.concepts || []);
+        if (data.stats) setStats(data.stats);
+      }
+    } catch (err) {
+      console.error("Failed to load concepts:", err);
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter]);
+
+  useEffect(() => {
+    fetchConcepts();
+  }, [fetchConcepts]);
+
+  const handleReviewAction = async (id: string, reviewAction: "approve" | "reject" | "archive") => {
+    try {
+      setActionLoading(id);
+      const res = await authFetch(`/api/admin/concepts/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reviewAction }),
+      });
+      if (res.ok) {
+        await fetchConcepts();
+      }
+    } catch (err) {
+      console.error(`Failed to ${reviewAction} concept:`, err);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const getSensitivityBadge = (s: string) => {
+    switch (s) {
+      case "HIGHLY_CONFIDENTIAL":
+        return <Badge variant="destructive">بسیار محرمانه</Badge>;
+      case "CONFIDENTIAL":
+        return <Badge className="bg-amber-600 hover:bg-amber-700">محرمانه</Badge>;
+      case "INTERNAL":
+        return <Badge variant="secondary">داخلی</Badge>;
+      default:
+        return <Badge variant="outline">عمومی</Badge>;
+    }
+  };
+
+  const getActionBadge = (a: string) => {
+    switch (a) {
+      case "BLOCK":
+        return <Badge variant="destructive">مسدودسازی کامل</Badge>;
+      case "ROUTE_LOCAL":
+        return <Badge className="bg-blue-600 hover:bg-blue-700">مسیر محلی (LOCAL)</Badge>;
+      case "MASK_AND_ALLOW_EXTERNAL":
+        return <Badge className="bg-purple-600 hover:bg-purple-700">ماسک + خروج</Badge>;
+      default:
+        return <Badge variant="outline">مجاز خارجی</Badge>;
+    }
+  };
+
+  const getStatusBadge = (st: string) => {
+    switch (st) {
+      case "ACTIVE":
+        return <Badge className="bg-emerald-600 hover:bg-emerald-700">فعال در رانتایم</Badge>;
+      case "REVIEW":
+        return <Badge variant="secondary" className="border border-amber-500 text-amber-600 dark:text-amber-400">در انتظار بررسی</Badge>;
+      case "REJECTED":
+        return <Badge variant="destructive">رد شده</Badge>;
+      case "ARCHIVED":
+        return <Badge variant="outline">آرشیو</Badge>;
+      default:
+        return <Badge variant="outline">{st}</Badge>;
+    }
+  };
+
+  return (
+    <div className="space-y-6">
+      {/* Stats Cards */}
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+        <Card>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold">{stats.total}</div>
+            <div className="text-xs text-muted-foreground">کل مفاهیم استخراج‌شده</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-amber-600">{stats.review}</div>
+            <div className="text-xs text-muted-foreground">در انتظار تأیید ادمین</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-emerald-600">{stats.active}</div>
+            <div className="text-xs text-muted-foreground">فعال در رانتایم</div>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold text-destructive">{stats.rejected}</div>
+            <div className="text-xs text-muted-foreground">رد شده</div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Concept List & Controls */}
+      <Card>
+        <CardHeader className="flex flex-row items-center justify-between pb-3">
+          <div>
+            <CardTitle className="text-base font-medium">مفاهیم معنایی سیاست (Policy Concepts)</CardTitle>
+            <p className="text-xs text-muted-foreground mt-1">
+              مفاهیم استخراج‌شده توسط مدل محلی؛ هیچ مفهومی بدون تأیید صریح ادمین فعال نمی‌شود (spec §13).
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger className="h-8 w-36 text-xs">
+                <SelectValue placeholder="فیلتر وضعیت" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="ALL">همه وضعیت‌ها</SelectItem>
+                <SelectItem value="REVIEW">در انتظار بررسی</SelectItem>
+                <SelectItem value="ACTIVE">فعال</SelectItem>
+                <SelectItem value="REJECTED">رد شده</SelectItem>
+                <SelectItem value="ARCHIVED">آرشیو</SelectItem>
+              </SelectContent>
+            </Select>
+            <Button variant="outline" size="sm" onClick={fetchConcepts} disabled={loading} className="h-8">
+              <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {loading ? (
+            <div className="space-y-3 py-6">
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+              <Skeleton className="h-16 w-full" />
+            </div>
+          ) : concepts.length === 0 ? (
+            <div className="py-12 text-center text-sm text-muted-foreground">
+              هیچ مفهوم سیاستی یافت نشد. اسناد سیاست را آپلود کنید تا مفاهیم به‌صورت ساختارآگاه استخراج شوند.
+            </div>
+          ) : (
+            <div className="space-y-4">
+              {concepts.map((concept) => (
+                <div
+                  key={concept.id}
+                  className="rounded-lg border bg-card p-4 text-card-foreground shadow-xs transition-colors"
+                >
+                  <div className="flex flex-wrap items-start justify-between gap-2 border-b pb-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className="font-semibold">{concept.nameFa || concept.name}</span>
+                        <code className="text-xs text-muted-foreground">({concept.conceptKey})</code>
+                      </div>
+                      {concept.category && (
+                        <span className="text-xs text-muted-foreground">دسته: {concept.category}</span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {getSensitivityBadge(concept.sensitivity)}
+                      {getActionBadge(concept.action)}
+                      {getStatusBadge(concept.reviewStatus)}
+                    </div>
+                  </div>
+
+                  <div className="mt-3 space-y-2 text-xs">
+                    <p className="text-muted-foreground leading-relaxed">{concept.descriptionFa}</p>
+
+                    {/* Provenance Quotation */}
+                    <div className="rounded border-r-4 border-blue-500 bg-muted/60 p-2 text-xs">
+                      <div className="flex items-center justify-between text-muted-foreground mb-1">
+                        <span className="font-semibold text-blue-600 dark:text-blue-400">سند و نقل‌قول مبنا (Provenance):</span>
+                        {concept.sourcePage && <span>صفحه: {concept.sourcePage}</span>}
+                      </div>
+                      <blockquote className="italic text-foreground">«{concept.sourceQuote}»</blockquote>
+                    </div>
+
+                    {/* Examples Preview */}
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 pt-1">
+                      {concept.positiveExamples?.length > 0 && (
+                        <div className="rounded bg-destructive/10 p-2 text-destructive">
+                          <span className="font-semibold block mb-1">نمونه‌های حساس (Positive):</span>
+                          <ul className="list-inside list-disc space-y-0.5">
+                            {concept.positiveExamples.slice(0, 2).map((ex, i) => (
+                              <li key={i}>{ex}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                      {concept.negativeExamples?.length > 0 && (
+                        <div className="rounded bg-emerald-500/10 p-2 text-emerald-700 dark:text-emerald-400">
+                          <span className="font-semibold block mb-1">نمونه‌های مجاز مشابه (Negative):</span>
+                          <ul className="list-inside list-disc space-y-0.5">
+                            {concept.negativeExamples.slice(0, 2).map((ex, i) => (
+                              <li key={i}>{ex}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Actions */}
+                  <div className="mt-4 flex items-center justify-end gap-2 border-t pt-3">
+                    {concept.reviewStatus !== "ACTIVE" && (
+                      <Button
+                        size="sm"
+                        variant="default"
+                        disabled={actionLoading === concept.id}
+                        onClick={() => handleReviewAction(concept.id, "approve")}
+                        className="h-7 bg-emerald-600 text-xs hover:bg-emerald-700"
+                      >
+                        {actionLoading === concept.id ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <CheckCircle2 className="mr-1 size-3" />
+                        )}
+                        تأیید و فعال‌سازی
+                      </Button>
+                    )}
+                    {concept.reviewStatus !== "REJECTED" && (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        disabled={actionLoading === concept.id}
+                        onClick={() => handleReviewAction(concept.id, "reject")}
+                        className="h-7 text-xs text-destructive hover:bg-destructive/10"
+                      >
+                        {actionLoading === concept.id ? (
+                          <Loader2 className="size-3 animate-spin" />
+                        ) : (
+                          <X className="mr-1 size-3" />
+                        )}
+                        رد مفهوم
+                      </Button>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Main Admin View
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -2077,6 +3357,11 @@ export function AdminView() {
               <FileText className="size-4" />
               <span className="hidden sm:inline">مدیریت سند</span>
               <span className="sm:hidden">سند</span>
+            </TabsTrigger>
+            <TabsTrigger value="concepts" className="gap-1.5">
+              <ShieldCheck className="size-4" />
+              <span className="hidden sm:inline">مفاهیم معنایی</span>
+              <span className="sm:hidden">مفاهیم</span>
             </TabsTrigger>
             <TabsTrigger value="rules" className="gap-1.5">
               <Pencil className="size-4" />
@@ -2102,6 +3387,9 @@ export function AdminView() {
 
           <TabsContent value="policy">
             <PolicyDocsTab />
+          </TabsContent>
+          <TabsContent value="concepts">
+            <PolicyConceptsTab />
           </TabsContent>
           <TabsContent value="rules">
             <RulesEditorTab />

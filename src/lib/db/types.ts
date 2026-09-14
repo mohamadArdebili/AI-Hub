@@ -3,11 +3,17 @@ export type {
   PolicyChunk,
   PolicyRule,
   PolicyDecisionLog,
+  PolicyAuditLog,
   ChatSession,
   ChatMessage,
   Organization,
   User,
   MaskDictionary,
+  PolicyUnit,
+  PolicyConcept,
+  PolicyConceptSource,
+  PolicyConceptExample,
+  PolicyConceptEmbedding,
 } from '@prisma/client';
 export type {
   PolicyDocumentStatus,
@@ -15,27 +21,18 @@ export type {
   PolicyAction,
   UserRole,
   MaskKind,
+  PolicyLifecycle,
+  RuleStatus,
+  RuleDetectorType,
+  CompiledRuleAction,
+  ConceptSensitivity,
+  ConceptAction,
+  ConceptReviewStatus,
+  PolicyUnitType,
 } from '@prisma/client';
 
-// PolicySnapshot: what the engine needs for evaluation
-export interface PolicySnapshot {
-  rules: Array<{
-    id: string;
-    code: string;
-    title: string;
-    keywords: string[];
-    patterns: string[];
-    severity: string;
-    category: string | null;
-    isActive: boolean;
-  }>;
-  chunks: Array<{
-    id: string;
-    content: string;
-    normalizedContent: string;
-    isRestricted: boolean;
-  }>;
-}
+// PolicySnapshot — single source of truth is the policy engine's strict type.
+export type { PolicySnapshot } from '@/lib/policy/types';
 
 // Log entry for decision logs
 export interface DecisionLogEntry {
@@ -50,8 +47,8 @@ export interface DecisionLogEntry {
   promptLength: number;
   latencyMs: number;
   engineVersion: string;
-  // ── Phase 3 audit fields ──
-  route?: 'EXTERNAL' | 'LOCAL' | 'BLOCKED' | null;
+  // ── Phase 3 & 5 audit fields ──
+  route?: 'EXTERNAL' | 'LOCAL' | 'BLOCKED' | string | null;
   maskCount?: number;
   maskLabels?: Array<{ label: string; count: number }>;
   isSensitive?: boolean | null;
@@ -62,4 +59,12 @@ export interface DecisionLogEntry {
   sourceIp?: string | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
+  // ── Phase 1 / Semantic Pipeline audit fields (spec §37) ──
+  sensitivity?: string | null;
+  matchedConceptIds?: string[];
+  retrievalScores?: Array<{ conceptId: string; score: number }> | string | null;
+  classifierMethod?: string | null;
+  egressMode?: string | null;
+  policyVersion?: number | null;
+  pipelineHealth?: string | null;
 }

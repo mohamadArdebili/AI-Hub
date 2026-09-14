@@ -98,7 +98,9 @@ function ChatMessageBase({ message }: ChatMessageProps) {
 
         {!isUser && !isPending && message.content && (
           <>
-            {message.route === "LOCAL" && <LocalRouteBadge />}
+            {message.route === "LOCAL" && (
+              <LocalRouteBadge uncertain={message.detection?.decision === "UNCERTAIN"} />
+            )}
             {message.maskLabels && message.maskLabels.length > 0 && (
               <MaskNotice findings={message.maskLabels} />
             )}
@@ -145,7 +147,15 @@ function MaskNotice({
   );
 }
 
-function LocalRouteBadge() {
+function LocalRouteBadge({ uncertain }: { uncertain?: boolean }) {
+  if (uncertain) {
+    return (
+      <span className="inline-flex items-center gap-1 rounded-md border border-orange-500/30 bg-orange-500/10 px-2 py-0.5 text-[11px] font-medium text-orange-700 dark:text-orange-300">
+        <Server className="size-3" aria-hidden="true" />
+        مسیر: امن محلی (تشخیص مبهم — fail-closed)
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/30 bg-emerald-500/10 px-2 py-0.5 text-[11px] font-medium text-emerald-700 dark:text-emerald-300">
       <Server className="size-3" aria-hidden="true" />

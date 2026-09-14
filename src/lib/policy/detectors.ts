@@ -1,6 +1,7 @@
 // Detection layers — standalone, no Next.js imports
 
 import type { RuleInput, ChunkInput, DetectionResult, MatchedRule } from './types';
+import type { DetectionHit } from './types';
 
 // ──────────────────────────────────────────────
 // Helpers
@@ -172,7 +173,7 @@ export function detectSensitiveData(text: string, normalizedText: string): Detec
       label: 'رشته اتصال پایگاه داده',
     },
     {
-      regex: /\bhost\s*=\s*\S+.*(?:port|password)\s*=\s*\S+/gis,
+      regex: /\bhost\s*=\s*\S+[\s\S]*?(?:port|password)\s*=\s*\S+/gi,
       label: 'اطلاعات اتصال سرور',
     },
   ];
@@ -535,4 +536,382 @@ export function detectBehavioralPatterns(
   }
 
   return result;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Sensitive-Data Layer — deterministic hit detectors
+//
+// These complement the legacy DetectionResult producers above with span-level
+// DetectionHit output (start/end/text + confidence) required by the runtime
+// detection pipeline. All checks are fully deterministic — no LLM involved.
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Checksum validators (real algorithms, not regex-only) ─────────────────
+
+export { isValidIranianNationalId, isValidLuhn };
+
+/**
+ * Validate an IBAN with the official mod-97 check (ISO 13616).
+ * Accepts forms with or without spaces; letters are case-insensitive.
+ * Iranian IBANs: IR + 2 check digits + 21 bank/account digits (26 chars).
+ */
+export function isValidIban(raw: string): boolean {
+  const iban = raw.replace(/[\s-]/g, '').toUpperCase();
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{11,30}$/.test(iban)) return false;
+  if (iban.startsWith('IR') && iban.length !== 26) return false;
+
+  // Move the first 4 characters to the end, then convert A=10..Z=35.
+  const rearranged = iban.slice(4) + iban.slice(0, 4);
+  let remainder = 0;
+  for (const ch of rearranged) {
+    const value = ch >= 'A' && ch <= 'Z' ? ch.charCodeAt(0) - 55 : parseInt(ch, 10);
+    if (Number.isNaN(value)) return false;
+    // Modulo in chunks keeps intermediate numbers within safe integer range.
+    remainder = (remainder * (value < 10 ? 10 : 100) + value) % 97;
+  }
+  return remainder === 1;
+}
+
+// ─── Hit producers (span + confidence) ─────────────────────────────────────
+
+/** Confidence tiers used by the classifier (>= 0.85 → SENSITIVE). */
+export const HIT_CONFIDENCE = {
+  CHECKSUM_VALID: 0.95,
+  SECRET_PATTERN: 0.92,
+  DICTIONARY_EXACT: 0.88,
+  BULK_CONTACT: 0.8,
+  KEYWORD_RULE: 0.85,
+  JAILBREAK: 0.95,
+  WEAK_SIGNAL: 0.6,
+} as const;
+
+interface ScanContext {
+  /** Original (un-normalized) prompt — spans refer to the normalized text. */
+  original: string;
+  /** Normalized prompt (digits latinized) — the scan target. */
+  normalized: string;
+}
+
+function pushHits(
+  hits: DetectionHit[],
+  ctx: ScanContext,
+  opts: {
+    detectorType: DetectionHit['detectorType'];
+    ruleId: string | null;
+    ruleLabel: string;
+    category: string;
+    confidence: number;
+    regex: RegExp;
+    validate?: (candidate: string) => boolean;
+    sourceRef?: DetectionHit['sourceRef'];
+    limit?: number;
+    /** scan the ORIGINAL text instead of the normalized one */
+    scanOriginal?: boolean;
+  },
+): void {
+  const { regex, validate } = opts;
+  const scanText = opts.scanOriginal ? ctx.original : ctx.normalized;
+  regex.lastIndex = 0;
+  let match: RegExpExecArray | null;
+  let count = 0;
+  while ((match = regex.exec(scanText)) !== null) {
+    const candidate = match[1] ?? match[0];
+    if (validate && !validate(candidate)) continue;
+    const start = match.index;
+    const end = start + match[0].length;
+    hits.push({
+      detectorType: opts.detectorType,
+      ruleId: opts.ruleId,
+      ruleLabel: opts.ruleLabel,
+      matchedSpan: { start, end, text: match[0] },
+      confidence: opts.confidence,
+      category: opts.category,
+      sourceRef: opts.sourceRef,
+    });
+    count++;
+    if (opts.limit && count >= opts.limit) break;
+  }
+  regex.lastIndex = 0;
+}
+
+/** Valid Iranian national IDs (mod-11 checksum) in the normalized text. */
+export function detectNationalIdHits(ctx: ScanContext): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  pushHits(hits, ctx, {
+    detectorType: 'CHECKSUM',
+    ruleId: null,
+    ruleLabel: 'کد ملی',
+    category: 'national_id',
+    confidence: HIT_CONFIDENCE.CHECKSUM_VALID,
+    regex: /(?<![0-9.])([0-9]{10})(?![0-9.])/g,
+    validate: isValidIranianNationalId,
+  });
+  return hits;
+}
+
+/** Valid Iranian bank-card numbers (Luhn checksum, 16 digits). */
+export function detectBankCardHits(ctx: ScanContext): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  pushHits(hits, ctx, {
+    detectorType: 'CHECKSUM',
+    ruleId: null,
+    ruleLabel: 'شماره کارت بانکی',
+    category: 'ir_bank_card',
+    confidence: HIT_CONFIDENCE.CHECKSUM_VALID,
+    // Grouped forms (6037-XXXX-XXXX-XXXX / 6037 XXXX ...) flatten to 16 digits.
+    regex: /(?<![0-9.])(?:[0-9][0-9-\s]{14,18}[0-9])(?![0-9.])/g,
+    validate: (candidate) => {
+      const flat = candidate.replace(/[\s-]/g, '');
+      return flat.length === 16 && isValidLuhn(flat);
+    },
+  });
+  return hits;
+}
+
+/** Valid IBAN / Sheba numbers (mod-97 checksum). */
+export function detectIbanHits(ctx: ScanContext): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  pushHits(hits, ctx, {
+    detectorType: 'CHECKSUM',
+    ruleId: null,
+    ruleLabel: 'شماره شبا',
+    category: 'iban',
+    confidence: HIT_CONFIDENCE.CHECKSUM_VALID,
+    regex: /\b(IR[0-9]{2}[0-9]{21}|[A-Z]{2}[0-9]{2}[A-Z0-9]{11,30})\b/gi,
+    validate: (candidate) => {
+      // Avoid double-reporting bank cards that happen to match the loose arm.
+      if (!/^IR/i.test(candidate) && ctx.original.length > 0) {
+        // Loose arm only accepts when it looks like an IBAN context — keep it
+        // conservative: require the text around it to mention شبا/IBAN.
+        const around = ctx.normalized.slice(
+          Math.max(0, (ctx.normalized.indexOf(candidate) ?? 0) - 40),
+        );
+        return /شبا|iban/i.test(around);
+      }
+      return isValidIban(candidate);
+    },
+  });
+  return hits;
+}
+
+/** Secrets / credentials patterns (API keys, private keys, connection strings). */
+export function detectSecretHits(ctx: ScanContext): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  const specs: Array<{ re: RegExp; label: string; category: string }> = [
+    { re: /\bsk-[A-Za-z0-9]{20,}\b/g, label: 'کلید API', category: 'api_key' },
+    { re: /\bAKIA[A-Z0-9]{16}\b/g, label: 'کلید AWS', category: 'api_key' },
+    { re: /-----BEGIN[\s\S]*?PRIVATE KEY-----/g, label: 'کلید خصوصی', category: 'private_key' },
+    {
+      re: /\b(?:password|passwd|secret|token)\s*[=:]\s*\S+/gi,
+      label: 'اعتبارنامه اتصال',
+      category: 'credential',
+    },
+    {
+      re: /\b(?:mongodb|mysql|postgres(?:ql)?|redis|amqp)(?:\+\S*)?:\/\/\S+/gi,
+      label: 'رشته اتصال پایگاه داده',
+      category: 'connection_string',
+    },
+  ];
+  for (const spec of specs) {
+    pushHits(hits, ctx, {
+      detectorType: 'REGEX',
+      ruleId: null,
+      ruleLabel: spec.label,
+      category: spec.category,
+      confidence: HIT_CONFIDENCE.SECRET_PATTERN,
+      regex: spec.re,
+      limit: 5,
+      scanOriginal: true,
+    });
+  }
+  return hits;
+}
+
+/** Bulk contact info (3+ emails or 3+ mobile numbers) — legacy semantic port. */
+export function detectBulkContactHits(ctx: ScanContext): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  const emails = ctx.original.match(
+    /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g,
+  );
+  if (emails && emails.length >= 3) {
+    hits.push({
+      detectorType: 'REGEX',
+      ruleId: null,
+      ruleLabel: 'آدرس ایمیل (انبوه)',
+      matchedSpan: { start: 0, end: 0, text: `${emails.length} ایمیل` },
+      confidence: HIT_CONFIDENCE.BULK_CONTACT,
+      category: 'bulk_email',
+    });
+  }
+  const mobiles = ctx.normalized.match(/(?:^|[^0-9])(09[0-9]{9})(?![0-9])/g);
+  if (mobiles && mobiles.length >= 3) {
+    hits.push({
+      detectorType: 'REGEX',
+      ruleId: null,
+      ruleLabel: 'شماره موبایل (انبوه)',
+      matchedSpan: { start: 0, end: 0, text: `${mobiles.length} موبایل` },
+      confidence: HIT_CONFIDENCE.BULK_CONTACT,
+      category: 'bulk_mobile',
+    });
+  }
+  return hits;
+}
+
+/** Jailbreak / prompt-injection attempts (deterministic keyword scan). */
+export function detectJailbreakHits(ctx: ScanContext): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  const patterns = [
+    'نادیده بگیر', 'دستورات قبلی را', 'ignore previous', 'ignore all previous',
+    'disregard previous', 'disregard all', 'بدون هیچ محدودیت', 'بدون محدودیت پاسخ',
+    'system prompt', 'پرامپت سیستمی', 'jailbreak', 'prompt injection',
+    'developer mode', 'dan mode', 'قوانین را دور بزن', 'tell me your instructions',
+  ];
+  for (const p of patterns) {
+    const idx = ctx.normalized.toLowerCase().indexOf(p.toLowerCase());
+    if (idx !== -1) {
+      hits.push({
+        detectorType: 'SEMANTIC',
+        ruleId: null,
+        ruleLabel: 'تلاش دور زدن فیلتر',
+        matchedSpan: { start: idx, end: idx + p.length, text: p },
+        confidence: HIT_CONFIDENCE.JAILBREAK,
+        category: 'jailbreak_injection',
+      });
+    }
+  }
+  return hits;
+}
+
+/**
+ * Dictionary-based detector fed by the organization's mask dictionary.
+ * Multi-word and sub-word matches are supported; the term patterns tolerate
+ * Persian orthography variants (ی/ي، ک/ك، ZWNJ، فاصله).
+ */
+export function detectDictionaryHits(
+  ctx: ScanContext,
+  dictionaries: { seniorOfficers: string[]; telcoHubNodes: string[]; proprietaryServices: string[] },
+  sourceRef?: DetectionHit['sourceRef'],
+): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+  const specs: Array<{ label: string; category: string; terms: string[] }> = [
+    { label: 'مدیر ارشد', category: 'senior_officer', terms: dictionaries.seniorOfficers },
+    { label: 'مرکز مخابراتی', category: 'telco_hub_node', terms: dictionaries.telcoHubNodes },
+    { label: 'سرویس انحصاری', category: 'proprietary_service', terms: dictionaries.proprietaryServices },
+  ];
+
+  for (const spec of specs) {
+    const terms = [...spec.terms]
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 2)
+      .sort((a, b) => b.length - a.length);
+    if (terms.length === 0) continue;
+
+    const re = new RegExp(terms.map(termToVariantPattern).join('|'), 'gi');
+    re.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = re.exec(ctx.original)) !== null) {
+      hits.push({
+        detectorType: 'DICTIONARY',
+        ruleId: null,
+        ruleLabel: spec.label,
+        matchedSpan: { start: match.index, end: match.index + match[0].length, text: match[0] },
+        confidence: HIT_CONFIDENCE.DICTIONARY_EXACT,
+        category: spec.category,
+        sourceRef,
+      });
+      if (hits.length > 200) break; // safety valve
+    }
+  }
+  return hits;
+}
+
+/** Escape a term and tolerate Persian orthography variants. */
+function termToVariantPattern(term: string): string {
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let pattern = '';
+  for (const ch of escaped) {
+    if (ch === 'ی') pattern += '[یي]';
+    else if (ch === 'ک') pattern += '[کك]';
+    else if (ch === ' ') pattern += '[\\s\u200C]+';
+    else if (ch === '-') pattern += '[\\-\u200C]?';
+    else pattern += ch;
+  }
+  return pattern;
+}
+
+/**
+ * Compiled-policy deterministic detectors: REGEX and DICTIONARY rules from the
+ * active document's compiled rule set. CHECKSUM rules map onto the builtin
+ * validators above; SEMANTIC rules match keyword lists.
+ */
+export function detectCompiledRuleHits(
+  ctx: ScanContext,
+  rules: Array<{
+    id: string;
+    detectorType: string;
+    regex?: { source: string; flags: string } | null;
+    checksumKind?: string | null;
+    semantic?: { keywords: string[]; weight: number } | null;
+    action?: string;
+    priority?: number;
+    source?: { documentId?: string; chunkId?: string; page?: number; quote?: string } | null;
+  }>,
+): DetectionHit[] {
+  const hits: DetectionHit[] = [];
+
+  for (const rule of rules) {
+    const sourceRef: DetectionHit['sourceRef'] | undefined = rule.source
+      ? {
+          documentId: rule.source.documentId ?? '',
+          chunkId: rule.source.chunkId,
+          page: rule.source.page,
+        }
+      : undefined;
+
+    if (rule.detectorType === 'REGEX' && rule.regex) {
+      try {
+        pushHits(hits, ctx, {
+          detectorType: 'REGEX',
+          ruleId: rule.id,
+          ruleLabel: 'قاعدهٔ سیاست',
+          category: 'policy_regex',
+          confidence: HIT_CONFIDENCE.KEYWORD_RULE,
+          regex: new RegExp(rule.regex.source, rule.regex.flags),
+          sourceRef,
+          limit: 3,
+        });
+      } catch {
+        // Invalid stored regex — skip deterministically (never throw).
+      }
+      continue;
+    }
+
+    if (rule.detectorType === 'SEMANTIC' && rule.semantic) {
+      for (const kw of rule.semantic.keywords) {
+        const idx = ctx.normalized.toLowerCase().indexOf(kw.toLowerCase());
+        if (idx !== -1) {
+          hits.push({
+            detectorType: 'SEMANTIC',
+            ruleId: rule.id,
+            ruleLabel: 'قاعدهٔ معنایی سیاست',
+            matchedSpan: { start: idx, end: idx + kw.length, text: kw },
+            confidence: HIT_CONFIDENCE.KEYWORD_RULE,
+            category: 'policy_semantic',
+            sourceRef,
+          });
+          break; // one hit per rule is enough
+        }
+      }
+      continue;
+    }
+
+    // CHECKSUM rules delegate to the builtin validators.
+    if (rule.detectorType === 'CHECKSUM') {
+      if (rule.checksumKind === 'IR_NATIONAL_ID') hits.push(...detectNationalIdHits(ctx));
+      else if (rule.checksumKind === 'IR_BANK_CARD') hits.push(...detectBankCardHits(ctx));
+      else if (rule.checksumKind === 'IBAN') hits.push(...detectIbanHits(ctx));
+    }
+  }
+
+  return hits;
 }

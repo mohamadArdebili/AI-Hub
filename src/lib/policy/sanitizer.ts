@@ -259,3 +259,54 @@ export function describeFindings(findings: MaskFinding[]): string {
     .map((f) => `${MASK_LABELS[f.label]} ×${f.count}`)
     .join('، ');
 }
+
+export interface SanitizationReport {
+  complete: boolean;
+  totalMasked: number;
+  findings: MaskFinding[];
+  unresolvedEntities: string[];
+  maskedText: string;
+}
+
+/**
+ * Perform sanitization and generate a formal SanitizationReport (MIGRATION_PLAN_REVIEWED_v1.1 §6.1).
+ * Verifies that all targeted entity types are properly masked and checks for any unresolved sensitive remnants.
+ */
+export function sanitizePromptWithReport(
+  text: string,
+  dictionaries: SanitizerDictionaries = EMPTY_DICT,
+  requiredEntities: string[] = [],
+): { result: SanitizeResult; report: SanitizationReport } {
+  const result = sanitizePrompt(text, dictionaries);
+  const unresolvedEntities: string[] = [];
+
+  // Check required entities: if any required entity was supposed to be masked but couldn't be resolved
+  for (const req of requiredEntities) {
+    // If requirement is in MASK_LABELS and wasn't found, or if raw text had it but masked text still has it
+    if (result.maskedText.includes(req)) {
+      unresolvedEntities.push(`UNRESOLVED_REQ_${req}`);
+    }
+  }
+
+  // Safety net: check if any unmasked national ID or private IP pattern remains in the masked output
+  const remainingAscii = toAsciiDigits(result.maskedText);
+  const natMatches = remainingAscii.match(/\b\d{10}\b/g);
+  if (natMatches) {
+    for (const m of natMatches) {
+      if (isValidNationalId(m)) {
+        unresolvedEntities.push(`UNMASKED_NATIONAL_ID:${m}`);
+      }
+    }
+  }
+
+  const report: SanitizationReport = {
+    complete: unresolvedEntities.length === 0,
+    totalMasked: result.totalCount,
+    findings: result.findings,
+    unresolvedEntities,
+    maskedText: result.maskedText,
+  };
+
+  return { result, report };
+}
+

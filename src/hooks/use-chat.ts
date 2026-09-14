@@ -67,7 +67,9 @@ export function useChat(): UseChatReturn {
     };
 
     // Build the conversation history to send (including the system prompt).
-    const history = [{ role: "system" as const, content: SYSTEM_PROMPT }];
+    const history: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
+      { role: "system", content: SYSTEM_PROMPT },
+    ];
     setMessages((prev) => {
       for (const m of prev) {
         if (m.error) continue;
@@ -152,7 +154,7 @@ export function useChat(): UseChatReturn {
               continue;
             }
 
-            // ─── Meta chunk (Phase 3: routing + mask info) ───────────────
+            // ─── Meta chunk (Phase 3 + Sensitive-Data Layer) ─────────────
             if (chunk.type === "meta") {
               setMessages((prev) =>
                 prev.map((message) =>
@@ -162,6 +164,7 @@ export function useChat(): UseChatReturn {
                         route: chunk.route,
                         maskLabels: chunk.maskLabels,
                         classifier: chunk.classifier,
+                        detection: chunk.detection,
                       }
                     : message
                 )

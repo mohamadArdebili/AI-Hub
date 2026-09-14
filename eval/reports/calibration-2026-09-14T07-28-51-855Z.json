@@ -1,0 +1,134 @@
+[
+  {
+    "minClassifierConfidence": 0.55,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 4,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.55,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.55,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.65,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.65,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 3,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.65,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.7,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.7,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.7,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.8,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.8,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "REJECTED"
+  },
+  {
+    "minClassifierConfidence": 0.8,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.5,
+    "sensitiveRecall": 0.083,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "REJECTED"
+  }
+]

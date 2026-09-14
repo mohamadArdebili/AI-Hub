@@ -9,6 +9,11 @@ import {
   detectBehavioralPatterns,
 } from './detectors';
 
+/**
+ * @deprecated Deprecated in Phase 6 (MIGRATION_PLAN_REVIEWED_v1.1 §6.6).
+ * Use `runDetection` / `runDetectionV2` from `@/lib/policy/detection/detection-pipeline` instead.
+ * Retained temporarily only for backwards compatibility with legacy UI previews.
+ */
 export async function evaluate(input: {
   prompt: string;
   organizationId: string;

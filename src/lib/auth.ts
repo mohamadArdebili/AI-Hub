@@ -85,11 +85,11 @@ export const authOptions: NextAuthOptions = {
   callbacks: {
     async jwt({ token, user }) {
       if (user) {
-        token.id = user.id;
-        token.email = user.email;
-        token.name = user.name;
-        token.role = user.role;
-        token.organizationId = user.organizationId;
+        token.id = user.id as string;
+        token.email = user.email as string;
+        token.name = (user.name ?? null) as string | null;
+        token.role = user.role as 'ADMIN' | 'EMPLOYEE';
+        token.organizationId = user.organizationId as string;
       }
       return token;
     },

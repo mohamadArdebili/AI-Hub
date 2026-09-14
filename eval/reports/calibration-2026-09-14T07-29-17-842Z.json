@@ -1,0 +1,134 @@
+[
+  {
+    "minClassifierConfidence": 0.55,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.55,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.55,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.65,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.65,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.65,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.7,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.7,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.7,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 3,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.8,
+    "minDenseScore": 0.35,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 1,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.8,
+    "minDenseScore": 0.45,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "ACCEPTED"
+  },
+  {
+    "minClassifierConfidence": 0.8,
+    "minDenseScore": 0.55,
+    "totalPrompts": 22,
+    "accuracy": 0.864,
+    "sensitiveRecall": 1,
+    "criticalFalseNegatives": 0,
+    "safeAccuracy": 1,
+    "p95LatencyMs": 2,
+    "status": "ACCEPTED"
+  }
+]

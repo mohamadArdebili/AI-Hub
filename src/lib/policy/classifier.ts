@@ -7,7 +7,6 @@
 // (fail-safe: ambiguity is treated as sensitive and routed to the local side,
 // never to the external cloud).
 
-import { llmComplete } from '@/lib/llm/client';
 
 export type RiskLevel = 'low' | 'medium' | 'high' | 'critical';
 export type ChatRoute = 'EXTERNAL' | 'LOCAL' | 'BLOCKED';
@@ -236,61 +235,139 @@ export function decideRoute(classifier: ClassifierResult): ChatRoute {
 // ─── Main entry point ───────────────────────────────────────────────────────
 
 /**
- * Classify the masked prompt. Runs the LLM when a provider is available and
- * merges its verdict with the deterministic heuristic (heuristic can only
- * raise the risk). Falls back to heuristic-only on any LLM failure.
+ * @deprecated Deprecated in Phase 6 (MIGRATION_PLAN_REVIEWED_v1.1 §6.6).
+ * Use `runDetectionV2` or `OllamaSemanticPolicyClassifier` on raw prompts instead.
+ * Classify the masked prompt deterministically using heuristic scan.
  */
 export async function classifyPrompt(maskedText: string): Promise<ClassifierResult> {
   const startedAt = Date.now();
   const heuristic = heuristicScan(maskedText);
-  const timeoutMs = parseInt(process.env.CLASSIFIER_TIMEOUT_MS ?? '8000', 10);
 
-  try {
-    const completion = await llmComplete(
-      [
-        { role: 'system', content: CLASSIFIER_SYSTEM_PROMPT },
-        {
-          role: 'user',
-          content: `پرامپت ماسک‌شدهٔ کاربر:\n"""${maskedText.slice(0, 4000)}"""`,
-        },
-      ],
-      { timeoutMs, temperature: 0 },
-    );
+  return {
+    isSensitive: heuristic.riskLevel !== 'low',
+    category: heuristic.category,
+    riskLevel: heuristic.riskLevel,
+    reason: heuristic.reason,
+    latencyMs: Date.now() - startedAt,
+    method: 'heuristic',
+  };
+}
 
-    const parsed = parseClassifierJson(completion.content);
-    if (!parsed) throw new Error('classifier returned invalid JSON');
+// ═══════════════════════════════════════════════════════════════════════════
+// Sensitive-Data Layer — deterministic classifier
+//
+// Replaces the LLM-based classifyPrompt in ALL runtime detection paths
+// (chat + policy tester). The external LLM is strictly forbidden in the
+// detection path (prompt §0.4), so classification is now a pure function of
+// the deterministic detection hits:
+//   SAFE      → no hit at all, no internal error
+//   SENSITIVE → at least one hit with confidence >= SENSITIVE_THRESHOLD
+//   UNCERTAIN → only low-confidence hits, or any internal detection error
+//               or timeout (fail-closed → LOCAL_ONLY, never external)
+// ═══════════════════════════════════════════════════════════════════════════
 
-    // Merge: heuristic can only raise the final risk.
-    const riskLevel = maxRisk(parsed.riskLevel, heuristic.riskLevel);
-    const category =
-      rankRisk(heuristic.riskLevel) > rankRisk(parsed.riskLevel)
-        ? heuristic.category
-        : parsed.category;
+import type {
+  DetectionHit,
+  DetectionOutcome,
+  RuntimeAction,
+  SensitivityDecision,
+} from './types';
 
-    return {
-      isSensitive: parsed.isSensitive || heuristic.riskLevel !== 'low',
-      category,
-      riskLevel,
-      reason:
-        rankRisk(heuristic.riskLevel) > rankRisk(parsed.riskLevel)
-          ? `${parsed.reason} | ${heuristic.reason}`
-          : parsed.reason,
-      latencyMs: Date.now() - startedAt,
-      method: 'llm',
-    };
-  } catch (err) {
-    // Fail-safe: heuristic verdict only. Ambiguity stays on the safe side.
-    console.warn(
-      '[classifier] LLM unavailable, using heuristic fallback:',
-      err instanceof Error ? err.message : err,
-    );
-    return {
-      isSensitive: heuristic.riskLevel !== 'low',
-      category: heuristic.category,
-      riskLevel: heuristic.riskLevel,
-      reason: `${heuristic.reason} (طبقه‌بند هوشمند در دسترس نبود)`,
-      latencyMs: Date.now() - startedAt,
-      method: 'heuristic',
-    };
+/** >= this → SENSITIVE. Below (but >= 0.5) → UNCERTAIN (fail-closed). */
+export const SENSITIVE_THRESHOLD = 0.85;
+/** Hits below this are noise and are dropped entirely. */
+export const NOISE_THRESHOLD = 0.5;
+
+export interface ClassifyDetectionInput {
+  hits: DetectionHit[];
+  /** Any detector raised/threw during the pipeline — forces UNCERTAIN. */
+  hadInternalError?: boolean;
+  /** Detection exceeded its time budget — forces UNCERTAIN (fail-closed). */
+  timedOut?: boolean;
+  /** sha256 of the normalized input (no raw text leaves this module). */
+  normalizedInputHash: string;
+  durationMs: number;
+}
+
+/**
+ * Pure deterministic mapping from detection hits to SAFE/SENSITIVE/UNCERTAIN
+ * and the runtime action (SAFE → EXTERNAL_ALLOWED, else LOCAL_ONLY).
+ */
+export function classifyDetection(input: ClassifyDetectionInput): DetectionOutcome {
+  const { hits, hadInternalError = false, timedOut = false } = input;
+
+  const significant = hits.filter((h) => h.confidence >= NOISE_THRESHOLD);
+  const maxConfidence = significant.reduce((m, h) => Math.max(m, h.confidence), 0);
+
+  let decision: SensitivityDecision;
+  let reason: string;
+
+  if (hadInternalError || timedOut) {
+    // Fail-closed: internal errors / timeouts must never look SAFE.
+    decision = 'UNCERTAIN';
+    reason = timedOut
+      ? 'پایپ‌لاین تشخیص در مهلت زمانی کامل نشد — تصمیم امن محلی اعمال شد'
+      : 'خطای داخلی در لایه تشخیص — تصمیم امن محلی اعمال شد';
+  } else if (significant.length === 0) {
+    decision = 'SAFE';
+    reason = 'هیچ نشانگر داده حساسی شناسایی نشد';
+  } else if (maxConfidence >= SENSITIVE_THRESHOLD) {
+    decision = 'SENSITIVE';
+    reason = `داده حساس با اطمینان بالا شناسایی شد: ${labelsOf(significant).slice(0, 3).join('، ')}`;
+  } else {
+    // 0.5 <= confidence < 0.85 → ambiguity → fail-closed.
+    decision = 'UNCERTAIN';
+    reason = `نشانگر مبهم با اطمینان پایین (${maxConfidence.toFixed(2)}) — به مسیر امن محلی ارجاع شد`;
   }
+
+  const action: RuntimeAction =
+    decision === 'SAFE' ? 'EXTERNAL_ALLOWED' : 'LOCAL_ONLY';
+
+  return {
+    decision,
+    action,
+    hits: significant,
+    processing: {
+      normalizedInputHash: input.normalizedInputHash,
+      durationMs: Math.round(input.durationMs),
+      localLlmUsed: false,
+      externalLlmInvoked: false,
+    },
+    reason,
+  };
+}
+
+function labelsOf(hits: DetectionHit[]): string[] {
+  const labels = new Set<string>();
+  for (const h of hits) {
+    labels.add(h.ruleLabel ?? h.category);
+  }
+  return Array.from(labels);
+}
+
+/** Categories whose hits imply a critical halt (existing BLOCKED UX semantics). */
+const CRITICAL_HIT_CATEGORIES = new Set([
+  'national_id',
+  'ir_bank_card',
+  'iban',
+  'api_key',
+  'private_key',
+  'credential',
+  'connection_string',
+  'jailbreak_injection',
+]);
+
+/**
+ * True when any hit implies a critical halt. A hit backed by a compiled rule
+ * with action BLOCK_EXTERNAL is also critical.
+ */
+export function isCriticalHitSet(
+  hits: DetectionHit[],
+  ruleActionById?: Map<string, string>,
+): boolean {
+  return hits.some((h) => {
+    if (CRITICAL_HIT_CATEGORIES.has(h.category)) return true;
+    if (h.ruleId && ruleActionById?.get(h.ruleId) === 'BLOCK_EXTERNAL') return true;
+    return false;
+  });
 }

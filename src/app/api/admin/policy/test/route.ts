@@ -1,35 +1,102 @@
 import { NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
 import { evaluate } from '@/lib/policy';
-import {
-  classifyPrompt,
-  decideRoute,
-  CATEGORIES,
-  type ClassifierResult,
-} from '@/lib/policy/classifier';
+import { isCriticalHitSet, CATEGORIES } from '@/lib/policy/classifier';
+import { runDetection } from '@/lib/policy/detection-pipeline';
 import { sanitizePrompt, MASK_LABELS } from '@/lib/policy/sanitizer';
-import { getPolicySnapshot, getActiveMaskTerms } from '@/lib/db';
+import {
+  getPolicySnapshot,
+  getActiveMaskTerms,
+  getActiveCompiledRules,
+} from '@/lib/db';
+import type { DetectionOutcome } from '@/lib/policy/types';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-// نسخهٔ پایپ‌لاین آزمایشگاه — همگام با /api/chat
-const PIPELINE_VERSION = 'phase3-dlp-router-1.0';
+const PIPELINE_VERSION = 'semantic-policy-pipeline-2.0';
 
 const ROUTE_FA: Record<string, string> = {
   EXTERNAL: 'مدل خارجی',
-  LOCAL: 'مدل محلی',
-  BLOCKED: 'متوقف شد',
+  EXTERNAL_DIRECT: 'مدل خارجی (مستقیم)',
+  EXTERNAL_MASKED: 'مدل خارجی (ماسک‌شده)',
+  LOCAL: 'مسیر امن محلی',
+  BLOCKED: 'مسدودسازی امنیتی',
 };
 
-interface PolicyTestResult {
+const HIT_CATEGORY_FA: Record<string, string> = {
+  national_id: 'کد ملی',
+  ir_bank_card: 'شماره کارت بانکی',
+  iban: 'شماره شبا',
+  api_key: 'کلید API',
+  private_key: 'کلید خصوصی',
+  credential: 'اعتبارنامه اتصال',
+  connection_string: 'رشته اتصال پایگاه داده',
+  bulk_email: 'آدرس ایمیل انبوه',
+  bulk_mobile: 'شماره موبایل انبوه',
+  jailbreak_injection: 'تلاش دور زدن فیلتر',
+  senior_officer: 'مدیر ارشد (دیکشنری)',
+  telco_hub_node: 'مرکز مخابراتی (دیکشنری)',
+  proprietary_service: 'سرویس انحصاری (دیکشنری)',
+  policy_regex: 'قاعدهٔ سیاست سازمانی',
+  policy_semantic: 'مفهوم سیاست سازمانی',
+};
+
+function hitLabel(hit: { category: string; ruleLabel?: string }): string {
+  return hit.ruleLabel ?? HIT_CATEGORY_FA[hit.category] ?? hit.category;
+}
+
+export interface PolicyTestResult {
   pipelineVersion: string;
   latencyMs: number;
+  finalRoute: 'EXTERNAL_DIRECT' | 'EXTERNAL_MASKED' | 'LOCAL' | 'BLOCKED' | 'EXTERNAL';
+  route: 'EXTERNAL_DIRECT' | 'EXTERNAL_MASKED' | 'LOCAL' | 'BLOCKED' | 'EXTERNAL';
+  routeFa: string;
+  pipelineHealth: 'HEALTHY' | 'DEGRADED' | 'FAILED';
+  policyVersion?: number;
   sanitize: {
     maskedText: string;
     maskCount: number;
     findings: Array<{ label: string; count: number; labelFa: string }>;
   };
+  deterministicHits: Array<{
+    detectorType: string;
+    category: string;
+    categoryFa: string;
+    matchedSpan: { start: number; end: number; text: string };
+    confidence: number;
+    ruleLabel?: string;
+  }>;
+  retrieval: Array<{
+    conceptId: string;
+    conceptKey: string;
+    name: string;
+    sensitivity: string;
+    action: string;
+    score: number;
+    denseScore?: number;
+    lexicalScore?: number;
+    rrfScore?: number;
+  }>;
+  classifier: {
+    decision?: string;
+    scope?: string;
+    confidence: number;
+    reasonFa: string;
+    method: string;
+    modelUsed?: string;
+    matchedConcepts?: string[];
+  } | null;
+  stageLatencies?: {
+    normalizationMs: number;
+    dlpMs: number;
+    retrievalMs: number;
+    classifierMs: number;
+    fusionMs: number;
+    decisionMs: number;
+    totalMs: number;
+  };
+  // Legacy backward-compatibility fields for UI
   engine: {
     action: 'ALLOW' | 'BLOCK';
     score: number;
@@ -39,22 +106,19 @@ interface PolicyTestResult {
     engineVersion: string;
     hasActiveDocument: boolean;
   };
-  classifier: {
-    isSensitive: boolean;
-    category: string;
-    categoryFa: string;
-    riskLevel: string;
+  detection: {
+    decision: string;
+    action: string;
+    hitCount: number;
+    hitLabels: string[];
+    durationMs: number;
     reason: string;
-    method: string;
-    latencyMs: number;
   } | null;
-  route: 'EXTERNAL' | 'LOCAL' | 'BLOCKED';
-  routeFa: string;
 }
 
-// POST /api/admin/policy/test — اجرای آزمایشیِ کامل پایپ‌لاین فاز ۳
-// (ماسک‌گذاری → موتور قواعد → طبقه‌بند هوشمند → مسیریابی) بدون پاسخ‌دهی مدل
-// و بدون نوشتن در لاگ ممیزی — صرفاً برای پیش‌نمایش رفتار گیت‌وی در پنل مدیریت.
+// POST /api/admin/policy/test — آزمایشگاه کامل ارزیابی سیاست امنیتی (MIGRATION_PLAN_REVIEWED_v1.1 §6.3, spec §36)
+// اجرای لایه‌های ماسک‌گذاری، تطبیق قطعی، بازیابی هیبریدی، قضاوت معنایی و مسیریابی چندمرحله‌ای
+// بدون فراخوانی هیچ LLM خارجی در مسیر تشخیص و بدون اثرگذاری در تاریخچه چت کاربر.
 export async function POST(request: NextRequest) {
   try {
     const session = await requireAdmin(request);
@@ -92,7 +156,7 @@ export async function POST(request: NextRequest) {
     const dictionaries = await getActiveMaskTerms(organizationId);
     const sanitized = sanitizePrompt(prompt, dictionaries);
 
-    // ── لایه ۲: موتور قواعد فاز ۲ (روی متن اصلی — همانند /api/chat) ─────
+    // ── لایه ۲: سازگاری عقبی موتور قواعد (legacy preview) ───────────────
     const policySnapshot = await getPolicySnapshot(organizationId);
     const decision = await evaluate({
       prompt,
@@ -100,24 +164,76 @@ export async function POST(request: NextRequest) {
       policySnapshot,
     });
 
-    const engineBlocked = decision.action === 'BLOCK';
+    // ── لایه ۳: پایپ‌لاین تشخیص پیشرفته (DLP + Retrieval + Local LLM Semantic Classifier) ─
+    const compiledRules = await getActiveCompiledRules(organizationId);
+    const outcome: DetectionOutcome = await runDetection({
+      prompt,
+      compiledRules,
+      dictionaries,
+      organizationId,
+    });
 
-    // ── لایه ۳: طبقه‌بند هوشمند (فقط وقتی موتور مسدود نکرده باشد) ────────
-    let classifier: ClassifierResult | null = null;
-    if (!engineBlocked) {
-      classifier = await classifyPrompt(sanitized.maskedText);
+    // Final route resolution
+    let finalRoute: PolicyTestResult['finalRoute'] =
+      outcome.route ??
+      (outcome.decision === 'SAFE'
+        ? 'EXTERNAL_DIRECT'
+        : outcome.action === 'EXTERNAL_ALLOWED'
+        ? 'EXTERNAL_MASKED'
+        : 'LOCAL');
+
+    if (
+      outcome.decision === 'SENSITIVE' &&
+      finalRoute !== 'EXTERNAL_MASKED' &&
+      isCriticalHitSet(
+        outcome.hits,
+        new Map(compiledRules.map((r) => [r.id, r.action])),
+      )
+    ) {
+      finalRoute = 'BLOCKED';
     }
 
-    // ── لایه ۴: تصمیم مسیریابی ──────────────────────────────────────────
-    const route: PolicyTestResult['route'] = engineBlocked
-      ? 'BLOCKED'
-      : classifier
-        ? decideRoute(classifier)
-        : 'BLOCKED';
+    const deterministicHits = outcome.hits.map((h) => ({
+      detectorType: h.detectorType,
+      category: h.category,
+      categoryFa: HIT_CATEGORY_FA[h.category] ?? CATEGORIES[h.category]?.fa ?? h.category,
+      matchedSpan: h.matchedSpan,
+      confidence: h.confidence,
+      ruleLabel: h.ruleLabel,
+    }));
+
+    const retrieval = (outcome.retrievedConcepts ?? outcome.matchedConcepts ?? []).map((c) => ({
+      conceptId: c.conceptId,
+      conceptKey: c.conceptKey,
+      name: c.name,
+      sensitivity: c.sensitivity,
+      action: c.action,
+      score: c.score,
+      denseScore: 'denseScore' in c ? (c as { denseScore?: number }).denseScore : undefined,
+      lexicalScore: 'lexicalScore' in c ? (c as { lexicalScore?: number }).lexicalScore : undefined,
+      rrfScore: 'rrfScore' in c ? (c as { rrfScore?: number }).rrfScore : undefined,
+    }));
+
+    const classifier = outcome.classifier
+      ? {
+          decision: outcome.classifier.decision ?? outcome.decision,
+          scope: outcome.classifier.scope ?? (outcome.decision === 'SAFE' ? 'GENERAL' : 'ORG_SPECIFIC'),
+          confidence: outcome.classifier.confidence,
+          reasonFa: outcome.classifier.reasonFa ?? outcome.classifier.reason ?? outcome.reason ?? '',
+          method: outcome.classifier.method,
+          modelUsed: outcome.classifier.modelUsed,
+          matchedConcepts: outcome.matchedConcepts?.map((c) => c.name),
+        }
+      : null;
 
     const result: PolicyTestResult = {
       pipelineVersion: PIPELINE_VERSION,
       latencyMs: Date.now() - startedAt,
+      finalRoute,
+      route: finalRoute,
+      routeFa: ROUTE_FA[finalRoute] ?? finalRoute,
+      pipelineHealth: outcome.pipelineHealth ?? 'HEALTHY',
+      policyVersion: outcome.policyVersion,
       sanitize: {
         maskedText: sanitized.maskedText,
         maskCount: sanitized.totalCount,
@@ -127,6 +243,10 @@ export async function POST(request: NextRequest) {
           labelFa: MASK_LABELS[f.label],
         })),
       },
+      deterministicHits,
+      retrieval,
+      classifier,
+      stageLatencies: outcome.stageLatencies,
       engine: {
         action: decision.action,
         score: decision.score,
@@ -140,21 +260,14 @@ export async function POST(request: NextRequest) {
         engineVersion: decision.engineVersion,
         hasActiveDocument: policySnapshot !== null,
       },
-      classifier:
-        classifier === null
-          ? null
-          : {
-              isSensitive: classifier.isSensitive,
-              category: classifier.category,
-              categoryFa:
-                CATEGORIES[classifier.category]?.fa ?? classifier.category,
-              riskLevel: classifier.riskLevel,
-              reason: classifier.reason,
-              method: classifier.method,
-              latencyMs: classifier.latencyMs,
-            },
-      route,
-      routeFa: ROUTE_FA[route] ?? route,
+      detection: {
+        decision: outcome.decision,
+        action: outcome.action,
+        hitCount: outcome.hits.length,
+        hitLabels: Array.from(new Set(outcome.hits.map(hitLabel))),
+        durationMs: outcome.processing.durationMs,
+        reason: outcome.reason ?? '',
+      },
     };
 
     return Response.json(result);
