@@ -136,6 +136,8 @@ export async function DELETE(
   } catch (error) {
     if (error instanceof Response) return error;
     console.error('[admin/concepts] DELETE error:', error);
-    return Response.json({ error: 'خطای سرور' }, { status: 500 });
+    const message = error instanceof Error ? error.message : 'خطای سرور';
+    const status = message.includes('not found') ? 404 : 500;
+    return Response.json({ error: message }, { status });
   }
 }

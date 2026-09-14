@@ -3087,6 +3087,8 @@ function PolicyConceptsTab() {
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
   const [actionLoading, setActionLoading] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [success, setSuccess] = useState<string | null>(null);
 
   const fetchConcepts = useCallback(async () => {
     try {
@@ -3111,17 +3113,46 @@ function PolicyConceptsTab() {
 
   const handleReviewAction = async (id: string, reviewAction: "approve" | "reject" | "archive") => {
     try {
+      setError(null);
       setActionLoading(id);
       const res = await authFetch(`/api/admin/concepts/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ reviewAction }),
       });
-      if (res.ok) {
-        await fetchConcepts();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `خطا در عملیات ${reviewAction}`);
       }
+      await fetchConcepts();
     } catch (err) {
       console.error(`Failed to ${reviewAction} concept:`, err);
+      setError(err instanceof Error ? err.message : `خطا در اجرای عملیات`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const handleDeleteConcept = async (id: string) => {
+    try {
+      setError(null);
+      setActionLoading(id);
+      const res = await authFetch(`/api/admin/concepts/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "خطا در حذف مفهوم سیاست");
+      }
+      setSuccess("مفهوم سیاست با موفقیت به‌صورت کامل و دائمی حذف گردید.");
+      // Remove immediately from UI (requirement 6)
+      setConcepts((prev) => prev.filter((c) => c.id !== id));
+      // Refresh list and statistics from server (requirement 6)
+      await fetchConcepts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error("Failed to delete concept:", err);
+      setError(err instanceof Error ? err.message : "خطای ناشناخته در حذف مفهوم سیاست");
     } finally {
       setActionLoading(null);
     }
@@ -3170,6 +3201,13 @@ function PolicyConceptsTab() {
 
   return (
     <div className="space-y-6">
+      {error && (
+        <ToastMessage message={error} type="error" onDismiss={() => setError(null)} />
+      )}
+      {success && (
+        <ToastMessage message={success} type="success" onDismiss={() => setSuccess(null)} />
+      )}
+
       {/* Stats Cards */}
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         <Card>
@@ -3299,6 +3337,45 @@ function PolicyConceptsTab() {
 
                   {/* Actions */}
                   <div className="mt-4 flex items-center justify-end gap-2 border-t pt-3">
+                    <AlertDialog>
+                      <AlertDialogTrigger asChild>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={actionLoading === concept.id}
+                          className="h-7 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive"
+                        >
+                          {actionLoading === concept.id ? (
+                            <Loader2 className="size-3 animate-spin" />
+                          ) : (
+                            <Trash2 className="mr-1 size-3" />
+                          )}
+                          حذف
+                        </Button>
+                      </AlertDialogTrigger>
+                      <AlertDialogContent>
+                        <AlertDialogHeader>
+                          <AlertDialogTitle>
+                            حذف دائمی مفهوم سیاست
+                          </AlertDialogTitle>
+                          <AlertDialogDescription>
+                            آیا از حذف دائمی این مفهوم سیاست اطمینان دارید؟
+                            <br />
+                            این اقدام غیرقابل بازگشت است. این مفهوم همراه با تمام نمونه‌ها (مثبت و منفی)، منابع و نقل‌قول‌های مبنا (Provenance Sources)، و بردار امبدینگ معنایی مرتبط با آن به‌صورت کامل و دائمی از سامانه حذف خواهند شد.
+                          </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                          <AlertDialogCancel>انصراف</AlertDialogCancel>
+                          <AlertDialogAction
+                            onClick={() => handleDeleteConcept(concept.id)}
+                            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                          >
+                            حذف قطعی
+                          </AlertDialogAction>
+                        </AlertDialogFooter>
+                      </AlertDialogContent>
+                    </AlertDialog>
+
                     {concept.reviewStatus !== "ACTIVE" && (
                       <Button
                         size="sm"
