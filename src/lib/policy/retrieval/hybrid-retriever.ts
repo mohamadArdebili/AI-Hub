@@ -68,10 +68,10 @@ export class HybridRetriever {
       options.minLexicalScore ??
       parseFloat(process.env.POLICY_LEXICAL_MIN_SCORE ?? '0');
 
-    // 1. Fetch active concepts pool for lexical and metadata
+    // 1. Fetch active concepts pool for lexical and metadata (scoped strictly to active policy document: AGENT_TASK §17)
     const activeConcepts = await getActiveConcepts(options.organizationId, {
       documentId: options.documentId,
-      onlyActiveDocument: options.onlyActiveDocument,
+      onlyActiveDocument: options.onlyActiveDocument ?? (options.documentId ? false : true),
     });
 
     if (activeConcepts.length === 0) {

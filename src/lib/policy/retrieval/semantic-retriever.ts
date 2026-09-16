@@ -46,11 +46,11 @@ export class SemanticRetriever {
     // 1. Embed query
     const queryVector = await this.embeddingProvider.embed(normalized);
 
-    // 2. Vector search in store
+    // 2. Vector search in store (scoped to active document if documentId omitted: AGENT_TASK §17)
     const results = await this.vectorStore.search(queryVector, {
       organizationId: options.organizationId,
       documentId: options.documentId,
-      onlyActiveDocument: options.onlyActiveDocument,
+      onlyActiveDocument: options.onlyActiveDocument ?? (options.documentId ? false : true),
       topK,
       minScore,
     });

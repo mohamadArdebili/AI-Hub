@@ -3090,6 +3090,102 @@ function PolicyConceptsTab() {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
+  // Concept Edit State (AGENT_TASK §12, §13)
+  const [editingConcept, setEditingConcept] = useState<ConceptItem | null>(null);
+  const [editForm, setEditForm] = useState<{
+    name: string;
+    nameFa: string;
+    descriptionFa: string;
+    category: string;
+    sensitivity: "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "HIGHLY_CONFIDENTIAL";
+    action: "ALLOW_EXTERNAL" | "ROUTE_LOCAL" | "MASK_AND_ALLOW_EXTERNAL" | "BLOCK";
+    positiveExamples: string[];
+    negativeExamples: string[];
+    conditions: string[];
+  }>({
+    name: "",
+    nameFa: "",
+    descriptionFa: "",
+    category: "",
+    sensitivity: "INTERNAL",
+    action: "ROUTE_LOCAL",
+    positiveExamples: [],
+    negativeExamples: [],
+    conditions: [],
+  });
+  const [newPositiveExample, setNewPositiveExample] = useState("");
+  const [newNegativeExample, setNewNegativeExample] = useState("");
+  const [newCondition, setNewCondition] = useState("");
+  const [saveLoading, setSaveLoading] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  const handleOpenEdit = (concept: ConceptItem) => {
+    setEditingConcept(concept);
+    setEditForm({
+      name: concept.name || "",
+      nameFa: concept.nameFa || "",
+      descriptionFa: concept.descriptionFa || "",
+      category: concept.category || "",
+      sensitivity: concept.sensitivity,
+      action: concept.action,
+      positiveExamples: [...(concept.positiveExamples || [])],
+      negativeExamples: [...(concept.negativeExamples || [])],
+      conditions: [...(concept.conditions || [])],
+    });
+    setNewPositiveExample("");
+    setNewNegativeExample("");
+    setNewCondition("");
+    setEditError(null);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!editingConcept) return;
+    if (!editForm.name.trim()) {
+      setEditError("نام مفهوم نمی‌تواند خالی باشد.");
+      return;
+    }
+    if (!editForm.descriptionFa.trim()) {
+      setEditError("شرح مفهوم نمی‌تواند خالی باشد.");
+      return;
+    }
+
+    try {
+      setSaveLoading(true);
+      setEditError(null);
+      const res = await authFetch(`/api/admin/concepts/${editingConcept.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: editForm.name.trim(),
+          nameFa: editForm.nameFa.trim() || null,
+          descriptionFa: editForm.descriptionFa.trim(),
+          category: editForm.category.trim() || null,
+          sensitivity: editForm.sensitivity,
+          action: editForm.action,
+          positiveExamples: editForm.positiveExamples,
+          negativeExamples: editForm.negativeExamples,
+          conditions: editForm.conditions,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data.error || "خطا در ذخیره تغییرات مفهوم سیاست");
+      }
+
+      setSuccess("تغییرات مفهوم سیاست با موفقیت ذخیره و ایندکس برداری معنایی همگام‌سازی شد.");
+      setEditingConcept(null);
+      await fetchConcepts();
+      setTimeout(() => setSuccess(null), 3000);
+    } catch (err) {
+      console.error("Failed to update concept:", err);
+      setEditError(err instanceof Error ? err.message : "خطای ناشناخته در ذخیره مفهوم");
+    } finally {
+      setSaveLoading(false);
+    }
+  };
+
   const fetchConcepts = useCallback(async () => {
     try {
       setLoading(true);
@@ -3337,6 +3433,17 @@ function PolicyConceptsTab() {
 
                   {/* Actions */}
                   <div className="mt-4 flex items-center justify-end gap-2 border-t pt-3">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={actionLoading === concept.id}
+                      onClick={() => handleOpenEdit(concept)}
+                      className="h-7 text-xs"
+                    >
+                      <Pencil className="mr-1 size-3" />
+                      ویرایش
+                    </Button>
+
                     <AlertDialog>
                       <AlertDialogTrigger asChild>
                         <Button
@@ -3415,6 +3522,401 @@ function PolicyConceptsTab() {
           )}
         </CardContent>
       </Card>
+
+      {/* Concept Edit Dialog (AGENT_TASK §12, §13) */}
+      <Dialog open={!!editingConcept} onOpenChange={(open) => { if (!open) setEditingConcept(null); }}>
+        <DialogContent className="max-w-2xl max-h-[85vh] overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle className="flex items-center justify-between">
+              <span>ویرایش مفهوم معنایی سیاست</span>
+              {editingConcept && (
+                <code className="text-xs text-muted-foreground font-mono">
+                  {editingConcept.conceptKey}
+                </code>
+              )}
+            </DialogTitle>
+            <DialogDescription>
+              اصلاح و تدقیق تفسیر معنایی سیاست توسط مدیر. پس از ذخیره، امبدینگ بردار معنایی همگام‌سازی می‌شود.
+            </DialogDescription>
+          </DialogHeader>
+
+          {editError && (
+            <div className="rounded-md bg-destructive/15 p-3 text-xs text-destructive flex items-center gap-2">
+              <AlertCircle className="size-4 shrink-0" />
+              <span>{editError}</span>
+            </div>
+          )}
+
+          {editingConcept && (
+            <div className="space-y-4 py-2 text-sm">
+              {/* Status & Indexing Notice */}
+              <div className="rounded-lg border p-3 bg-muted/40 space-y-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-muted-foreground">وضعیت بررسی:</span>
+                  {getStatusBadge(editingConcept.reviewStatus)}
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  {editingConcept.reviewStatus === "ACTIVE"
+                    ? "این مفهوم در رانتایم فعال است. با ذخیره هرگونه تغییر معنایی، بردار امبدینگ قدیمی نامعتبر شده و فوراً بازتولید می‌گردد تا در بازیابی معنایی اعمال شود."
+                    : "این مفهوم هنوز در وضعیت بررسی است. بردار امبدینگ هنگام تأیید و فعال‌سازی ساخته خواهد شد."}
+                </p>
+              </div>
+
+              {/* Name & NameFa */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label htmlFor="concept-name" className="text-xs font-medium">
+                    نام فنی / انگلیسی <span className="text-destructive">*</span>
+                  </Label>
+                  <Input
+                    id="concept-name"
+                    value={editForm.name}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, name: e.target.value }))}
+                    placeholder="e.g. customer_confidential_records"
+                    className="text-xs"
+                  />
+                </div>
+                <div className="space-y-1.5">
+                  <Label htmlFor="concept-name-fa" className="text-xs font-medium">
+                    نام فارسی
+                  </Label>
+                  <Input
+                    id="concept-name-fa"
+                    value={editForm.nameFa}
+                    onChange={(e) => setEditForm((prev) => ({ ...prev, nameFa: e.target.value }))}
+                    placeholder="مثال: سوابق محرمانه مشتریان"
+                    className="text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Description */}
+              <div className="space-y-1.5">
+                <Label htmlFor="concept-desc" className="text-xs font-medium">
+                  شرح دقیق معنایی <span className="text-destructive">*</span>
+                </Label>
+                <Textarea
+                  id="concept-desc"
+                  rows={3}
+                  value={editForm.descriptionFa}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, descriptionFa: e.target.value }))}
+                  placeholder="شرح مفهوم، دامنه شمول و حدود حساسیت..."
+                  className="text-xs leading-relaxed"
+                />
+              </div>
+
+              {/* Sensitivity & Action */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">سطح حساسیت</Label>
+                  <Select
+                    value={editForm.sensitivity}
+                    onValueChange={(val: any) => setEditForm((prev) => ({ ...prev, sensitivity: val }))}
+                  >
+                    <SelectTrigger className="text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="PUBLIC">عمومی (PUBLIC)</SelectItem>
+                      <SelectItem value="INTERNAL">داخلی (INTERNAL)</SelectItem>
+                      <SelectItem value="CONFIDENTIAL">محرمانه (CONFIDENTIAL)</SelectItem>
+                      <SelectItem value="HIGHLY_CONFIDENTIAL">بسیار محرمانه (HIGHLY_CONFIDENTIAL)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+
+                <div className="space-y-1.5">
+                  <Label className="text-xs font-medium">اقدام رانتایم (Action)</Label>
+                  <Select
+                    value={editForm.action}
+                    onValueChange={(val: any) => setEditForm((prev) => ({ ...prev, action: val }))}
+                  >
+                    <SelectTrigger className="text-xs">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="ALLOW_EXTERNAL">مجاز خارجی (ALLOW_EXTERNAL)</SelectItem>
+                      <SelectItem value="MASK_AND_ALLOW_EXTERNAL">ماسک + مجاز خارجی (MASK_AND_ALLOW_EXTERNAL)</SelectItem>
+                      <SelectItem value="ROUTE_LOCAL">مسیر محلی (ROUTE_LOCAL)</SelectItem>
+                      <SelectItem value="BLOCK">مسدودسازی کامل (BLOCK)</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+              </div>
+
+              {/* Category */}
+              <div className="space-y-1.5">
+                <Label htmlFor="concept-category" className="text-xs font-medium">
+                  دسته‌بندی (اختیاری)
+                </Label>
+                <Input
+                  id="concept-category"
+                  value={editForm.category}
+                  onChange={(e) => setEditForm((prev) => ({ ...prev, category: e.target.value }))}
+                  placeholder="مثال: اطلاعات هویتی، مالی، فنی..."
+                  className="text-xs"
+                />
+              </div>
+
+              {/* Positive Examples */}
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-medium text-destructive">
+                    نمونه‌های شمول / حساس (Positive Examples)
+                  </Label>
+                  <span className="text-[11px] text-muted-foreground">
+                    ({editForm.positiveExamples.length} نمونه)
+                  </span>
+                </div>
+                <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  {editForm.positiveExamples.map((ex, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between gap-2 rounded bg-destructive/10 px-2.5 py-1.5 text-xs text-destructive"
+                    >
+                      <span className="flex-1 leading-normal">{ex}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditForm((prev) => ({
+                            ...prev,
+                            positiveExamples: prev.positiveExamples.filter((_, i) => i !== idx),
+                          }))
+                        }
+                        className="hover:opacity-75"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={newPositiveExample}
+                    onChange={(e) => setNewPositiveExample(e.target.value)}
+                    placeholder="افزودن نمونه مثبت جدید..."
+                    className="text-xs h-8"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && newPositiveExample.trim()) {
+                        e.preventDefault();
+                        setEditForm((prev) => ({
+                          ...prev,
+                          positiveExamples: [...prev.positiveExamples, newPositiveExample.trim()],
+                        }));
+                        setNewPositiveExample("");
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs shrink-0"
+                    disabled={!newPositiveExample.trim()}
+                    onClick={() => {
+                      if (newPositiveExample.trim()) {
+                        setEditForm((prev) => ({
+                          ...prev,
+                          positiveExamples: [...prev.positiveExamples, newPositiveExample.trim()],
+                        }));
+                        setNewPositiveExample("");
+                      }
+                    }}
+                  >
+                    <Plus className="size-3.5 ml-1" />
+                    افزودن
+                  </Button>
+                </div>
+              </div>
+
+              {/* Negative Examples */}
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-medium text-emerald-700 dark:text-emerald-400">
+                    نمونه‌های مجاز مشابه (Negative Examples)
+                  </Label>
+                  <span className="text-[11px] text-muted-foreground">
+                    ({editForm.negativeExamples.length} نمونه — صرفاً برای قاضی معنایی محلی)
+                  </span>
+                </div>
+                <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  {editForm.negativeExamples.map((ex, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between gap-2 rounded bg-emerald-500/10 px-2.5 py-1.5 text-xs text-emerald-700 dark:text-emerald-400"
+                    >
+                      <span className="flex-1 leading-normal">{ex}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditForm((prev) => ({
+                            ...prev,
+                            negativeExamples: prev.negativeExamples.filter((_, i) => i !== idx),
+                          }))
+                        }
+                        className="hover:opacity-75"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={newNegativeExample}
+                    onChange={(e) => setNewNegativeExample(e.target.value)}
+                    placeholder="افزودن نمونه منفی جدید..."
+                    className="text-xs h-8"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && newNegativeExample.trim()) {
+                        e.preventDefault();
+                        setEditForm((prev) => ({
+                          ...prev,
+                          negativeExamples: [...prev.negativeExamples, newNegativeExample.trim()],
+                        }));
+                        setNewNegativeExample("");
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs shrink-0"
+                    disabled={!newNegativeExample.trim()}
+                    onClick={() => {
+                      if (newNegativeExample.trim()) {
+                        setEditForm((prev) => ({
+                          ...prev,
+                          negativeExamples: [...prev.negativeExamples, newNegativeExample.trim()],
+                        }));
+                        setNewNegativeExample("");
+                      }
+                    }}
+                  >
+                    <Plus className="size-3.5 ml-1" />
+                    افزودن
+                  </Button>
+                </div>
+              </div>
+
+              {/* Conditions / Exceptions */}
+              <div className="space-y-2 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <Label className="text-xs font-medium text-blue-600 dark:text-blue-400">
+                    شروط و استثناها (Conditions & Exceptions)
+                  </Label>
+                  <span className="text-[11px] text-muted-foreground">
+                    ({editForm.conditions.length} شرط)
+                  </span>
+                </div>
+                <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  {editForm.conditions.map((c, idx) => (
+                    <div
+                      key={idx}
+                      className="flex items-center justify-between gap-2 rounded bg-blue-500/10 px-2.5 py-1.5 text-xs text-blue-700 dark:text-blue-400"
+                    >
+                      <span className="flex-1 leading-normal">{c}</span>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setEditForm((prev) => ({
+                            ...prev,
+                            conditions: prev.conditions.filter((_, i) => i !== idx),
+                          }))
+                        }
+                        className="hover:opacity-75"
+                      >
+                        <X className="size-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="flex gap-2">
+                  <Input
+                    value={newCondition}
+                    onChange={(e) => setNewCondition(e.target.value)}
+                    placeholder="افزودن شرط یا استثنا..."
+                    className="text-xs h-8"
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && newCondition.trim()) {
+                        e.preventDefault();
+                        setEditForm((prev) => ({
+                          ...prev,
+                          conditions: [...prev.conditions, newCondition.trim()],
+                        }));
+                        setNewCondition("");
+                      }
+                    }}
+                  />
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    className="h-8 text-xs shrink-0"
+                    disabled={!newCondition.trim()}
+                    onClick={() => {
+                      if (newCondition.trim()) {
+                        setEditForm((prev) => ({
+                          ...prev,
+                          conditions: [...prev.conditions, newCondition.trim()],
+                        }));
+                        setNewCondition("");
+                      }
+                    }}
+                  >
+                    <Plus className="size-3.5 ml-1" />
+                    افزودن
+                  </Button>
+                </div>
+              </div>
+
+              {/* Read-Only Provenance Section */}
+              <div className="rounded-lg border bg-muted/40 p-3 space-y-2 border-t pt-3 text-xs">
+                <div className="flex items-center justify-between font-semibold text-muted-foreground">
+                  <span>نقل‌قول و اصالت مبنا (Provenance — غیرقابل تغییر دستی):</span>
+                  {editingConcept.sourcePage && <span>صفحه: {editingConcept.sourcePage}</span>}
+                </div>
+                <blockquote className="italic text-foreground border-r-2 border-blue-500 pr-2">
+                  «{editingConcept.sourceQuote}»
+                </blockquote>
+                {editingConcept.extractedByModel && (
+                  <div className="text-[11px] text-muted-foreground pt-1">
+                    استخراج اولیه توسط مدل: <code>{editingConcept.extractedByModel}</code>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => setEditingConcept(null)}
+              disabled={saveLoading}
+              className="text-xs"
+            >
+              انصراف
+            </Button>
+            <Button
+              type="button"
+              onClick={handleSaveEdit}
+              disabled={saveLoading}
+              className="text-xs bg-blue-600 hover:bg-blue-700"
+            >
+              {saveLoading ? (
+                <>
+                  <Loader2 className="size-3.5 animate-spin ml-1.5" />
+                  در حال ذخیره و به‌روزرسانی ایندکس...
+                </>
+              ) : (
+                "ذخیره تغییرات"
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

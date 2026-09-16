@@ -3,7 +3,7 @@
 
 import { db } from '@/lib/db/client';
 import type { PolicyConcept } from '../concepts/types';
-import { getActiveConcepts } from '../concepts/repository';
+import { getActiveConcepts, getConceptById } from '../concepts/repository';
 import {
   type EmbeddingProvider,
   buildConceptEmbeddingText,
@@ -62,6 +62,11 @@ export interface VectorStore {
     documentId: string,
     embeddingProvider: EmbeddingProvider,
   ): Promise<{ indexed: number; failed: number }>;
+  regenerateConceptEmbedding?(
+    conceptId: string,
+    organizationId: string,
+    embeddingProvider: EmbeddingProvider,
+  ): Promise<void>;
 }
 
 export class PrismaVectorStore implements VectorStore {
@@ -103,7 +108,7 @@ export class PrismaVectorStore implements VectorStore {
 
   /**
    * In-process dense cosine similarity search against ACTIVE concepts (spec §16).
-   * Inactive, draft, or unapproved concepts are strictly ignored.
+   * Inactive, draft, unapproved, or stale concepts are strictly ignored.
    */
   async search(
     queryVector: number[],
@@ -113,15 +118,26 @@ export class PrismaVectorStore implements VectorStore {
     const minScore = options.minScore ?? 0;
 
     // Fetch active concepts with their embeddings
+    // Active policy scoping: when documentId is not specified, scope strictly to the active document (AGENT_TASK §17)
     const concepts = await getActiveConcepts(options.organizationId, {
       documentId: options.documentId,
-      onlyActiveDocument: options.onlyActiveDocument,
+      onlyActiveDocument: options.onlyActiveDocument ?? (options.documentId ? false : true),
     });
 
     const scored: ScoredConcept[] = [];
 
     for (const concept of concepts) {
       if (!concept.embedding || !concept.embedding.vector) {
+        continue;
+      }
+
+      // Drift & Stale Embedding Detection (AGENT_TASK §5, §6, §7, §14):
+      // The embedding's textHash must match the current concept's semantic content.
+      // If the concept was edited and the embedding is stale or unregenerated,
+      // fail-closed: do not allow stale semantic knowledge to masquerade as current.
+      const currentText = buildConceptEmbeddingText(concept);
+      const currentHash = computeEmbeddingTextHash(currentText);
+      if (concept.embedding.textHash !== currentHash) {
         continue;
       }
 
@@ -135,6 +151,35 @@ export class PrismaVectorStore implements VectorStore {
     scored.sort((a, b) => b.score - a.score);
 
     return scored.slice(0, topK);
+  }
+
+  /**
+   * Regenerates and updates the vector embedding for an ACTIVE concept (AGENT_TASK §5, §6, §14).
+   * If the concept is not ACTIVE, any existing embedding is removed.
+   */
+  async regenerateConceptEmbedding(
+    conceptId: string,
+    organizationId: string,
+    embeddingProvider: EmbeddingProvider,
+  ): Promise<void> {
+    const concept = await getConceptById(conceptId, organizationId);
+    if (!concept) {
+      throw new Error(`PolicyConcept with id "${conceptId}" not found in organization "${organizationId}"`);
+    }
+
+    // Step 1: Invalidate / delete old embedding first (fail-closed invariant)
+    await this.deleteEmbedding(conceptId);
+
+    // Step 2: Only ACTIVE concepts receive embeddings in the vector index (spec §16)
+    if (concept.reviewStatus === 'ACTIVE') {
+      const text = buildConceptEmbeddingText(concept);
+      const textHash = computeEmbeddingTextHash(text);
+      const vector = await embeddingProvider.embed(text);
+      if (!vector || vector.length === 0) {
+        throw new Error(`Embedding provider returned empty vector for concept ${conceptId}`);
+      }
+      await this.upsertEmbedding(conceptId, vector, embeddingProvider.getModel(), textHash);
+    }
   }
 
   /**

@@ -69,6 +69,31 @@ export const ExtractedConceptSchema = z.object({
 export type ExtractedConcept = z.infer<typeof ExtractedConceptSchema>;
 
 /**
+ * Server-side validation schema for Admin concept edits (AGENT_TASK §10).
+ * Validates non-empty fields, enums, example arrays, and conditions.
+ */
+export const UpdateConceptSchema = z.object({
+  name: z.string().trim().min(1, 'نام مفهوم نمی‌تواند خالی باشد').optional(),
+  nameFa: z.string().trim().nullable().optional(),
+  descriptionFa: z.string().trim().min(1, 'شرح مفهوم نمی‌تواند خالی باشد').optional(),
+  category: z.string().trim().nullable().optional(),
+  sensitivity: ConceptSensitivitySchema.optional(),
+  action: ConceptActionSchema.optional(),
+  positiveExamples: z.array(z.string().trim().min(1, 'نمونه مثبت نمی‌تواند خالی باشد')).optional(),
+  negativeExamples: z.array(z.string().trim().min(1, 'نمونه منفی نمی‌تواند خالی باشد')).optional(),
+  conditions: z.array(z.string().trim().min(1, 'شرط نمی‌تواند خالی باشد')).optional(),
+  keywords: z.array(z.string().trim().min(1, 'کلیدواژه نمی‌تواند خالی باشد')).optional(),
+  detectorHints: DetectorHintsSchema.nullable().optional(),
+  sourceQuote: z.string().trim().min(1, 'نقل‌قول مبنا نمی‌تواند خالی باشد').optional(),
+  sourcePage: z.number().int().positive().nullable().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+  reviewStatus: ConceptReviewStatusSchema.optional(),
+  reviewNote: z.string().trim().nullable().optional(),
+});
+
+export type UpdateConceptPayload = z.infer<typeof UpdateConceptSchema>;
+
+/**
  * Flexible container supporting array directly or wrapped in { concepts: [...] }
  */
 export const ExtractedConceptsEnvelopeSchema = z.union([
