@@ -19,6 +19,8 @@ function createOutcome(overrides: Partial<DetectionOutcome> = {}): DetectionOutc
       externalLlmInvoked: false,
     },
     route: 'EXTERNAL_DIRECT',
+    pipelineHealth: 'HEALTHY',
+    classifier: { method: 'local_llm', scope: 'GENERAL', confidence: 0.95 },
     ...overrides,
   };
 }
@@ -93,7 +95,7 @@ describe('assertExternalEgressAllowed (Phase 6 External Guard)', () => {
         rawPrompt: 'شماره ملی کاربر: 0012345678',
         egressPayload: completeReport.maskedText,
       }),
-    ).not.toThrow();
+    ).toThrow(/Masked egress is disabled/);
   });
 
   it('forbids EXTERNAL_MASKED if isMaskedPayload is false', () => {
@@ -110,7 +112,7 @@ describe('assertExternalEgressAllowed (Phase 6 External Guard)', () => {
         sanitizationReport: completeReport,
         egressPayload: completeReport.maskedText,
       }),
-    ).toThrow(/requires isMaskedPayload=true/);
+    ).toThrow(/Masked egress is disabled/);
   });
 
   it('forbids EXTERNAL_MASKED if sanitization report is incomplete', () => {
@@ -132,7 +134,7 @@ describe('assertExternalEgressAllowed (Phase 6 External Guard)', () => {
         sanitizationReport: incompleteReport,
         egressPayload: completeReport.maskedText,
       }),
-    ).toThrow(/requires SanitizationReport.complete=true/);
+    ).toThrow(/Masked egress is disabled/);
   });
 
   it('prevents raw sensitive prompt leak when masked payload equals raw prompt', () => {
@@ -150,7 +152,7 @@ describe('assertExternalEgressAllowed (Phase 6 External Guard)', () => {
         rawPrompt: 'raw sensitive text',
         egressPayload: 'raw sensitive text', // LEAK ATTEMPT!
       }),
-    ).toThrow(/raw leak prevented/);
+    ).toThrow(/Masked egress is disabled/);
   });
 
   it('forbids external egress unconditionally for LOCAL and BLOCKED routes', () => {

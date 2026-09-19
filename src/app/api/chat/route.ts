@@ -2,20 +2,16 @@ import crypto from "crypto";
 import { NextRequest } from "next/server";
 
 import { getAuthSession } from "@/lib/auth";
-import { evaluate } from "@/lib/policy";
-import { isCriticalHitSet } from "@/lib/policy/classifier";
-import { runDetection } from "@/lib/policy/detection-pipeline";
+import { detectConversation, serializeConversation, assertCurrentPolicy } from "@/lib/policy/conversation";
 import {
   assertExternalSafeAllowed,
   assertExternalEgressAllowed,
   assertNoExternalLlmInDetection,
 } from "@/lib/policy/external-guard";
-import { sanitizePrompt, sanitizePromptWithReport, MASK_LABELS } from "@/lib/policy/sanitizer";
+import { sanitizePrompt, MASK_LABELS } from "@/lib/policy/sanitizer";
 import {
-  getPolicySnapshot,
   createDecisionLog,
   getActiveMaskTerms,
-  getActiveCompiledRules,
   createPolicyAuditLog,
 } from "@/lib/db";
 import {
@@ -24,7 +20,6 @@ import {
   type LlmMessage,
 } from "@/lib/llm/client";
 import type { ChatStreamChunk, ChatRoute } from "@/lib/chat-types";
-import type { PolicyDecision } from "@/lib/policy/types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -36,7 +31,7 @@ type NormalizedMessage = {
   content: string;
 };
 
-const PIPELINE_VERSION = "sensitive-data-layer-1.0";
+const PIPELINE_VERSION = "conversation-policy-routing-3.0";
 
 /** Persian labels for detection hit categories (local-route notice). */
 const HIT_CATEGORY_FA: Record<string, string> = {
@@ -107,20 +102,58 @@ function getClientIp(req: NextRequest): string {
   return req.headers.get("x-real-ip") ?? "unknown";
 }
 
+function getDetectionLabels(
+  hits: Array<{ category: string; ruleLabel?: string }>,
+  matchedConcepts?: Array<{ category?: string | null; name?: string; nameFa?: string | null; conceptKey?: string }>,
+  decision?: string
+): string[] {
+  const rawLabels: string[] = [];
+
+  for (const h of hits) {
+    const label = hitLabel(h);
+    if (label) rawLabels.push(label);
+  }
+
+  if (matchedConcepts && matchedConcepts.length > 0) {
+    for (const c of matchedConcepts) {
+      const cat = c.category?.trim();
+      if (cat) {
+        rawLabels.push(HIT_CATEGORY_FA[cat] ?? cat);
+      } else {
+        const fallback = c.nameFa?.trim() || c.name?.trim() || c.conceptKey?.trim();
+        if (fallback) rawLabels.push(fallback);
+      }
+    }
+  }
+
+  if (rawLabels.length === 0) {
+    if (decision === "SENSITIVE") {
+      rawLabels.push("سیاست امنیتی سازمانی");
+    } else if (decision === "UNCERTAIN") {
+      rawLabels.push("عدم قطعیت در تطبیق سیاست (ارجاع احتیاطی)");
+    }
+  }
+
+  return Array.from(new Set(rawLabels));
+}
+
 function buildLocalNotice(
   outcomeReason: string,
   hits: Array<{ category: string; ruleLabel?: string }>,
   decision: string,
-  maskSummary: string | null
+  maskSummary: string | null,
+  matchedConcepts?: Array<{ category?: string | null; name?: string; nameFa?: string | null; conceptKey?: string }>
 ): string {
-  const labels = Array.from(new Set(hits.map(hitLabel)));
+  const labels = getDetectionLabels(hits, matchedConcepts, decision);
+  const categoryText = labels.length > 0 ? labels.join("، ") : "سیاست سازمانی";
+
   const lines = [
     decision === "SENSITIVE"
       ? "🔒 **این درخواست حساس تشخیص داده شد و به «مسیر امن محلی» سازمان هدایت شد.**"
       : "⚠️ **نتیجهٔ تشخیص مبهم بود و به‌صورت fail-closed به «مسیر امن محلی» هدایت شد.**",
     "",
-    `- دستهٔ تشخیص: ${labels.length > 0 ? labels.join("، ") : "نامشخص"}`,
-    `- دلیل: ${outcomeReason}`,
+    `- دستهٔ تشخیص: ${categoryText}`,
+    `- دلیل: ${outcomeReason || (decision === "SENSITIVE" ? "انطباق با سیاست‌های امنیتی سازمان" : "نیاز به بررسی در محیط امن محلی")}`,
   ];
   if (maskSummary) {
     lines.push(`- داده‌های ماسک‌شده: ${maskSummary}`);
@@ -208,76 +241,13 @@ export async function POST(req: NextRequest) {
     .digest("hex");
 
   const streamEncoder = new TextEncoder();
-  const isSemanticEnabled = process.env.POLICY_SEMANTIC_ENABLED === 'true';
-
-  let legacyDecision: PolicyDecision | null = null;
-
-  // ── Layer 2: Deterministic policy engine (only in legacy mode when semantic is disabled) ──
-  if (!isSemanticEnabled) {
-    const policySnapshot = await getPolicySnapshot(organizationId);
-    legacyDecision = await evaluate({
-      prompt: lastUserMessage,
-      organizationId,
-      policySnapshot,
-    });
-
-    // ── Engine BLOCK path (مسدودسازی قطعی قواعد قدیمی) ───────────────────────
-    if (legacyDecision.action === "BLOCK") {
-      await createDecisionLog({
-        userId,
-        organizationId,
-        action: "BLOCK",
-        score: legacyDecision.score,
-        reasons: legacyDecision.reasons,
-        matchedRuleIds: legacyDecision.matchedRules.map((r) => r.code),
-        promptHash,
-        promptPreview: maskPreview(sanitized.maskedText),
-        promptLength: lastUserMessage.length,
-        latencyMs: Math.round(legacyDecision.latencyMs),
-        engineVersion: legacyDecision.engineVersion,
-        route: "BLOCKED",
-        maskCount: sanitized.totalCount,
-        maskLabels: sanitized.findings,
-        sourceIp,
-      });
-
-      const blockedChunk: ChatStreamChunk = {
-        type: "blocked",
-        reason: legacyDecision.reasons.join("\n"),
-        matchedRules: legacyDecision.matchedRules,
-      };
-
-      return new Response(
-        new ReadableStream<Uint8Array>({
-          start(controller) {
-            controller.enqueue(
-              streamEncoder.encode(`data: ${JSON.stringify(blockedChunk)}\n\n`)
-            );
-            controller.enqueue(
-              streamEncoder.encode(`data: ${JSON.stringify({ type: "done" })}\n\n`)
-            );
-            controller.close();
-          },
-        }),
-        { headers: sseHeaders() }
-      );
-    }
-  }
-
-  // ── Layer 3: Detection Pipeline (DLP + Hybrid Retrieval + Local LLM Semantic Judge) ─
-  const compiledRules = await getActiveCompiledRules(organizationId);
-  const outcome = await runDetection({
-    prompt: lastUserMessage,
-    compiledRules,
-    dictionaries,
-    organizationId,
-  });
+  const outcome = await detectConversation(messages, organizationId);
   assertNoExternalLlmInDetection(outcome);
 
-  const decisionScore = legacyDecision?.score ?? (outcome.decision === "SAFE" ? 0 : 1);
-  const decisionReasons = legacyDecision?.reasons ?? (outcome.reason ? [outcome.reason] : []);
-  const decisionMatchedRuleIds = legacyDecision?.matchedRules.map((r) => r.code) ?? (outcome.matchedConcepts?.map((c) => c.conceptKey) ?? []);
-  const decisionLatencyMs = legacyDecision?.latencyMs ?? outcome.processing.durationMs;
+  const decisionScore = outcome.decision === "SAFE" ? 0 : 1;
+  const decisionReasons = outcome.reason ? [outcome.reason] : [];
+  const decisionMatchedRuleIds = outcome.matchedConcepts?.map(c => c.conceptKey) ?? [];
+  const decisionLatencyMs = outcome.processing.durationMs;
 
   const maskSummary =
     sanitized.totalCount > 0
@@ -286,43 +256,48 @@ export async function POST(req: NextRequest) {
           .join("، ")
       : null;
 
-  const chatRoute: ChatRoute =
-    outcome.route === "BLOCKED"
-      ? "BLOCKED"
-      : outcome.route === "LOCAL"
-      ? "LOCAL"
-      : outcome.route === "EXTERNAL_MASKED"
-      ? "EXTERNAL_MASKED"
-      : outcome.route === "EXTERNAL_DIRECT"
-      ? "EXTERNAL_DIRECT"
-      : outcome.decision === "SAFE"
-      ? "EXTERNAL"
-      : "LOCAL";
+  const chatRoute: ChatRoute = outcome.route ?? "LOCAL";
+
+  const detectionLabels = getDetectionLabels(
+    outcome.hits,
+    outcome.matchedConcepts,
+    outcome.decision
+  );
+
+  const primaryCategory =
+    outcome.hits[0]?.category ??
+    outcome.matchedConcepts?.[0]?.category ??
+    outcome.matchedConcepts?.[0]?.nameFa ??
+    outcome.matchedConcepts?.[0]?.name ??
+    (outcome.decision === "SENSITIVE" ? "policy_semantic" : null);
+
+  const allAuditCategories = Array.from(
+    new Set(
+      [
+        ...outcome.hits.map((h) => h.category),
+        ...(outcome.matchedConcepts ?? []).map(
+          (c) => c.category || c.nameFa || c.name
+        ),
+      ].filter((x): x is string => Boolean(x && x.trim()))
+    )
+  );
 
   const metaChunk: ChatStreamChunk = {
     type: "meta",
     route: chatRoute,
-    maskLabels: sanitized.findings,
+    maskLabels: chatRoute === "EXTERNAL_DIRECT" ? [] : sanitized.findings,
     detection: {
       decision: outcome.decision,
-      hitLabels: Array.from(new Set(outcome.hits.map(hitLabel))),
+      hitLabels: detectionLabels,
       method: outcome.classifier?.method ?? "deterministic",
     },
   };
 
   // ── Router: BLOCKED or SENSITIVE-critical → توقف کامل (کارت تخلف بحرانی) ────
-  const isBlocked =
-    chatRoute === "BLOCKED" ||
-    (outcome.decision === "SENSITIVE" &&
-      chatRoute !== "EXTERNAL_MASKED" &&
-      isCriticalHitSet(
-        outcome.hits,
-        new Map(compiledRules.map((r) => [r.id, r.action])),
-      ));
+  const isBlocked = chatRoute === "BLOCKED";
 
   if (isBlocked) {
-    const labels = Array.from(new Set(outcome.hits.map(hitLabel)));
-    const blockReason = `تخلف بحرانی از سیاست امنیتی شناسایی شد (${labels.join("، ")}). درخواست متوقف و در کارتابل حراست ثبت شد.\n${outcome.reason ?? ""}`;
+    const blockReason = "این درخواست به دلیل درخواست افشای اطلاعات بسیار حساس یا نقض سیاست امنیتی متوقف شد.";
 
     await createDecisionLog({
       userId,
@@ -342,7 +317,7 @@ export async function POST(req: NextRequest) {
       maskCount: sanitized.totalCount,
       maskLabels: sanitized.findings,
       isSensitive: true,
-      classifierCategory: outcome.hits[0]?.category ?? null,
+      classifierCategory: primaryCategory,
       classifierRisk: "critical",
       classifierReason: outcome.reason ?? null,
       classifierLatencyMs: outcome.processing.durationMs,
@@ -364,8 +339,8 @@ export async function POST(req: NextRequest) {
       metadata: {
         decision: outcome.decision,
         action: outcome.action,
-        hitCount: outcome.hits.length,
-        categories: Array.from(new Set(outcome.hits.map((h) => h.category))),
+        hitCount: outcome.hits.length + (outcome.matchedConcepts?.length ?? 0),
+        categories: allAuditCategories,
         normalizedInputHash: outcome.processing.normalizedInputHash,
         durationMs: outcome.processing.durationMs,
       },
@@ -394,18 +369,15 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Router: LOCAL or non-external SENSITIVE / UNCERTAIN → مسیر امن محلی (fail-closed) ─
-  const isLocal =
-    chatRoute === "LOCAL" ||
-    (chatRoute !== "EXTERNAL_MASKED" &&
-      chatRoute !== "EXTERNAL_DIRECT" &&
-      outcome.decision !== "SAFE");
+  const isLocal = chatRoute !== "EXTERNAL_DIRECT";
 
   if (isLocal) {
     const notice = buildLocalNotice(
       outcome.reason ?? "",
       outcome.hits,
       outcome.decision,
-      maskSummary
+      maskSummary,
+      outcome.matchedConcepts
     );
 
     await createDecisionLog({
@@ -424,7 +396,7 @@ export async function POST(req: NextRequest) {
       maskCount: sanitized.totalCount,
       maskLabels: sanitized.findings,
       isSensitive: outcome.decision === "SENSITIVE",
-      classifierCategory: outcome.hits[0]?.category ?? null,
+      classifierCategory: primaryCategory,
       classifierRisk: outcome.decision === "SENSITIVE" ? "high" : "medium",
       classifierReason: outcome.reason ?? null,
       classifierLatencyMs: outcome.processing.durationMs,
@@ -446,8 +418,8 @@ export async function POST(req: NextRequest) {
       metadata: {
         decision: outcome.decision,
         action: outcome.action,
-        hitCount: outcome.hits.length,
-        categories: Array.from(new Set(outcome.hits.map((h) => h.category))),
+        hitCount: outcome.hits.length + (outcome.matchedConcepts?.length ?? 0),
+        categories: allAuditCategories,
         normalizedInputHash: outcome.processing.normalizedInputHash,
         durationMs: outcome.processing.durationMs,
       },
@@ -475,47 +447,11 @@ export async function POST(req: NextRequest) {
   }
 
   // ── Router: EXTERNAL_DIRECT or EXTERNAL_MASKED → External LLM با گارد سخت ────────
-  let outboundUserText: string;
-
-  if (chatRoute === "EXTERNAL_MASKED") {
-    const { result: maskedResult, report } = sanitizePromptWithReport(lastUserMessage, dictionaries);
-    assertExternalEgressAllowed({
-      outcome,
-      route: "EXTERNAL_MASKED",
-      isMaskedPayload: true,
-      sanitizationReport: report,
-      rawPrompt: lastUserMessage,
-      egressPayload: maskedResult.maskedText,
-      expectedPolicyVersion: outcome.policyVersion,
-    });
-    outboundUserText = maskedResult.maskedText;
-  } else {
-    // EXTERNAL_DIRECT or legacy SAFE
-    assertExternalEgressAllowed({
-      outcome,
-      route: outcome.route || "EXTERNAL_DIRECT",
-      rawPrompt: lastUserMessage,
-      egressPayload: sanitized.maskedText,
-      expectedPolicyVersion: outcome.policyVersion,
-    });
-    assertExternalSafeAllowed(outcome);
-    outboundUserText = sanitized.maskedText;
-  }
-
-  const outboundMessages: LlmMessage[] = messages.map((m, idx) => {
-    if (idx === messages.length - 1 - lastUserIndex) {
-      return { role: "user", content: outboundUserText };
-    }
-    if (m.role === "user") {
-      return {
-        role: "user",
-        content: sanitizePrompt(m.content, dictionaries).maskedText,
-      };
-    }
-    return { role: m.role, content: m.content };
-  });
+  // The exact payload classified above is the only payload eligible for egress.
+  const outboundMessages: LlmMessage[] = messages.map(({ role, content }) => ({ role, content }));
 
   let completionTokens: number | undefined;
+  let externalInvoked = false;
 
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -530,8 +466,14 @@ export async function POST(req: NextRequest) {
       };
 
       try {
+        assertExternalEgressAllowed({
+          outcome, route: chatRoute, egressPayload: serializeConversation(outboundMessages),
+          expectedPolicyVersion: outcome.policyVersion,
+        });
+        assertExternalSafeAllowed(outcome);
+        await assertCurrentPolicy(outcome, organizationId);
         send(metaChunk);
-
+        externalInvoked = true;
         const result = await llmStreamChat(outboundMessages, req.signal);
 
         if (result.kind === "sse") {
@@ -588,13 +530,15 @@ export async function POST(req: NextRequest) {
 
         send({ type: "done" });
       } catch (error) {
-        const message =
-          error instanceof Error
-            ? error.message
-            : "خطای نامشخص در ارتباط با سرویس مدل زبانی";
 
         console.error("[/api/chat] external LLM error:", error);
-        send({ type: "error", message });
+        if (!externalInvoked) {
+          send({ ...metaChunk, route: "LOCAL", detection: { ...metaChunk.detection!, decision: "UNCERTAIN" } });
+          send({ type: "delta", content: "سیاست در حین بررسی تغییر کرد یا مجوز ارسال خارجی تأیید نشد؛ درخواست در مسیر امن محلی نگه داشته شد." });
+          send({ type: "done" });
+        } else {
+          send({ type: "error", message: "امکان پردازش امن درخواست در حال حاضر وجود ندارد." });
+        }
       } finally {
         closed = true;
         controller.close();
@@ -612,9 +556,9 @@ export async function POST(req: NextRequest) {
           promptLength: lastUserMessage.length,
           latencyMs: Math.round(decisionLatencyMs),
           engineVersion: PIPELINE_VERSION,
-          route: outcome.route ?? "EXTERNAL",
-          maskCount: sanitized.totalCount,
-          maskLabels: sanitized.findings,
+          route: externalInvoked ? "EXTERNAL_DIRECT" : "LOCAL",
+          maskCount: 0,
+          maskLabels: [],
           isSensitive: false,
           classifierCategory: null,
           classifierRisk: "low",

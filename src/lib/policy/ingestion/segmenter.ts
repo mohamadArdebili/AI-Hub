@@ -52,10 +52,30 @@ export const DEFAULT_CANDIDATE_KEYWORDS = [
   'نشانی سرور',
 ];
 
+export const SKELETON_METADATA_PATTERNS = [
+  /^:?\s*(Sensitivity|Action|Status|Version|Policy\s*ID)\b/i,
+  /^(Positive\s*Examples|Negative\s*Examples|Positive\s*\/\s*Allowed\s*Examples|Allowed\s*Examples|Positive\s*\/\s*Forbidden\s*Examples)/i,
+  /^:?\s*(ALLOW_EXTERNAL|ROUTE_LOCAL|MASK_AND_ALLOW_EXTERNAL|BLOCK|EXTERNAL_DIRECT|EXTERNAL_MASKED|LOCAL|BLOCKED)\b/i,
+];
+
+export function isSkeletonOrMetadataLine(line: string): boolean {
+  const trimmed = line.trim();
+  return SKELETON_METADATA_PATTERNS.some((p) => p.test(trimmed));
+}
+
 const HEADING_PATTERNS = [
   /^(فصل|بخش|پیوست|قسمت)\s+[۰-۹0-9IVXLCDMivxlcdm\u06F0-\u06F9]+(\s*[:ـ\-–—\.]|\s+)/,
-  /^[۰-۹0-9\u06F0-\u06F9]+[\-\.\)]\s+/,
+  /^[.\-–—]?[۰-۹0-9\u06F0-\u06F9]+[\-\.\)]?\s+/,
 ];
+
+export function isNumberedSectionHeading(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length > 80) return false;
+  if (isSkeletonOrMetadataLine(trimmed)) return false;
+  if (/[\.!؟\?؛]$/.test(trimmed)) return false;
+  if (trimmed.endsWith(':')) return false;
+  return HEADING_PATTERNS.some((p) => p.test(trimmed));
+}
 
 const BULLET_PATTERNS = [
   /^[\s]*[•\*\-–—]\s+/,
@@ -64,7 +84,7 @@ const BULLET_PATTERNS = [
 ];
 
 const CLAUSE_PATTERNS = [
-  /^(ماده|بند|تبصره|قاعده|اصل)\s+[۰-۹0-9\u06F0-\u06F9A-Za-z_-]+[:ـ\-–—\.]?/,
+  /^(ماده|بند|تبصره|قاعده|اصل|تعریف|نکته)\s+[۰-۹0-9\u06F0-\u06F9A-Za-z_-]*[:ـ\-–—\.]?/,
 ];
 
 /**
@@ -97,23 +117,28 @@ export function splitSentences(text: string): string[] {
 /**
  * Determines whether a single line is a section heading.
  */
-function isHeadingLine(line: string): boolean {
+export function isHeadingLine(line: string, nextLine?: string | null): boolean {
   const trimmed = line.trim();
   if (!trimmed || trimmed.length > 120) return false;
-  if (isClauseStart(trimmed)) return false;
-  if (isBulletLine(trimmed)) return false;
+  if (isSkeletonOrMetadataLine(trimmed)) return false;
   if (isTableLine(trimmed)) return false;
 
-  // Pattern matches
-  for (const pattern of HEADING_PATTERNS) {
-    if (pattern.test(trimmed)) return true;
+  // If followed immediately by metadata line like ':Action ...', this is a level/rule title, not a document section heading
+  if (nextLine && isSkeletonOrMetadataLine(nextLine) && !isNumberedSectionHeading(trimmed)) {
+    return false;
   }
 
+  if (isNumberedSectionHeading(trimmed)) {
+    return true;
+  }
+
+  if (isClauseStart(trimmed)) return false;
+  if (isBulletLine(trimmed)) return false;
+
   // Short line with no sentence terminal punctuation
-  if (trimmed.length <= 60 && !/[\.!؟\?؛]$/.test(trimmed)) {
-    // If it has multiple words (2 to 10 words)
+  if (trimmed.length <= 60 && !/[\.!؟\?؛]$/.test(trimmed) && !trimmed.endsWith(':') && !trimmed.startsWith(':')) {
     const words = trimmed.split(/\s+/);
-    if (words.length >= 2 && words.length <= 10) {
+    if (words.length >= 2 && words.length <= 8) {
       return true;
     }
   }
@@ -121,17 +146,35 @@ function isHeadingLine(line: string): boolean {
   return false;
 }
 
-function isTableLine(line: string): boolean {
+export function isTableLine(line: string): boolean {
   const trimmed = line.trim();
-  return trimmed.includes('|') && (trimmed.startsWith('|') || trimmed.endsWith('|'));
+  return (
+    (trimmed.includes('|') && (trimmed.startsWith('|') || trimmed.endsWith('|'))) ||
+    /^ID\s+سناریو\b/i.test(trimmed) ||
+    /^T\d+\s+/i.test(trimmed)
+  );
 }
 
-function isBulletLine(line: string): boolean {
+export function isBulletLine(line: string): boolean {
   return BULLET_PATTERNS.some((p) => p.test(line.trim()));
 }
 
-function isClauseStart(line: string): boolean {
+export function isClauseStart(line: string): boolean {
   return CLAUSE_PATTERNS.some((p) => p.test(line.trim()));
+}
+
+export function isExampleMarkerLine(line: string): boolean {
+  const trimmed = line.trim();
+  return /^(Positive\s*Examples|Negative\s*Examples|Positive\s*\/\s*Allowed\s*Examples|Allowed\s*Examples|Positive\s*\/\s*Forbidden\s*Examples)/i.test(trimmed);
+}
+
+export function isLevelClauseStart(line: string, nextLine?: string | null): boolean {
+  const trimmed = line.trim();
+  if (/^سطح\s+/i.test(trimmed)) return true;
+  if (nextLine && isSkeletonOrMetadataLine(nextLine) && !isNumberedSectionHeading(trimmed)) {
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -153,13 +196,16 @@ export function segmentDocument(
   for (const page of pages) {
     const rawLines = page.text.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
     let lineIdx = 0;
+    let pendingMetadata: string[] = [];
 
     while (lineIdx < rawLines.length) {
       const line = rawLines[lineIdx];
+      const nextLine = lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null;
 
       // 1. HEADING
-      if (isHeadingLine(line)) {
+      if (isHeadingLine(line, nextLine)) {
         currentSectionTitle = line;
+        pendingMetadata = [];
         const norm = normalizePersian(line);
         units.push({
           ordinal: ordinal++,
@@ -177,9 +223,17 @@ export function segmentDocument(
         continue;
       }
 
+      // Standalone skeleton metadata line (e.g. :Sensitivity ..., :Action ...)
+      if (isSkeletonOrMetadataLine(line) && !isExampleMarkerLine(line)) {
+        pendingMetadata.push(line);
+        lineIdx++;
+        continue;
+      }
+
       // 2. TABLE (group consecutive table rows)
       if (isTableLine(line)) {
-        const tableLines: string[] = [];
+        const tableLines: string[] = [...pendingMetadata];
+        pendingMetadata = [];
         while (lineIdx < rawLines.length && isTableLine(rawLines[lineIdx])) {
           tableLines.push(rawLines[lineIdx]);
           lineIdx++;
@@ -201,12 +255,66 @@ export function segmentDocument(
         continue;
       }
 
-      // 3. BULLET GROUP (group consecutive bullet items)
-      if (isBulletLine(line)) {
-        const bulletLines: string[] = [];
-        while (lineIdx < rawLines.length && isBulletLine(rawLines[lineIdx])) {
-          bulletLines.push(rawLines[lineIdx]);
+      // 3. LEVEL CLAUSE (e.g. 'سطح عمومی' + ':Action ALLOW_EXTERNAL' + description)
+      if (isLevelClauseStart(line, nextLine)) {
+        const clauseLines: string[] = [...pendingMetadata, line];
+        pendingMetadata = [];
+        lineIdx++;
+        while (
+          lineIdx < rawLines.length &&
+          !isHeadingLine(rawLines[lineIdx], lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null) &&
+          !isTableLine(rawLines[lineIdx]) &&
+          !isBulletLine(rawLines[lineIdx]) &&
+          !isLevelClauseStart(rawLines[lineIdx], lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null)
+        ) {
+          clauseLines.push(rawLines[lineIdx]);
           lineIdx++;
+          if (/[\.!؟\?]$/.test(clauseLines[clauseLines.length - 1])) {
+            break;
+          }
+        }
+        const clauseText = clauseLines.join('\n');
+        const norm = normalizePersian(clauseText);
+        units.push({
+          ordinal: ordinal++,
+          page: page.page,
+          sectionTitle: currentSectionTitle,
+          text: clauseText,
+          normalizedText: norm,
+          unitType: 'CLAUSE',
+          spanStart: globalCharOffset,
+          spanEnd: globalCharOffset + clauseText.length,
+          isCandidate: isCandidateUnit(clauseText, keywords),
+        });
+        globalCharOffset += clauseText.length + 1;
+        continue;
+      }
+
+      // 4. BULLET GROUP (optionally prefixed with example markers and pending metadata)
+      const isExampleMarker = isExampleMarkerLine(line);
+      if (isBulletLine(line) || isExampleMarker) {
+        const bulletLines: string[] = [...pendingMetadata];
+        pendingMetadata = [];
+        if (isExampleMarker) {
+          bulletLines.push(line);
+          lineIdx++;
+        }
+        while (
+          lineIdx < rawLines.length &&
+          !isHeadingLine(rawLines[lineIdx], lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null) &&
+          !isTableLine(rawLines[lineIdx]) &&
+          !isLevelClauseStart(rawLines[lineIdx], lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null)
+        ) {
+          if (isExampleMarkerLine(rawLines[lineIdx]) && bulletLines.length > 0) {
+            break;
+          }
+          const curr = rawLines[lineIdx];
+          const isBullet = isBulletLine(curr);
+          bulletLines.push(curr);
+          lineIdx++;
+          if (!isBullet && !isExampleMarker && curr.endsWith('.')) {
+            break;
+          }
         }
         const bulletText = bulletLines.join('\n');
         const norm = normalizePersian(bulletText);
@@ -225,30 +333,33 @@ export function segmentDocument(
         continue;
       }
 
-      // 4. CLAUSE or PARAGRAPH
-      const isClause = isClauseStart(line);
-      const paraLines: string[] = [];
+      // 5. CLAUSE or PARAGRAPH
+      const isClause = isClauseStart(line) || pendingMetadata.length > 0;
+      const paraLines: string[] = [...pendingMetadata];
+      pendingMetadata = [];
 
       while (
         lineIdx < rawLines.length &&
-        !isHeadingLine(rawLines[lineIdx]) &&
+        !isHeadingLine(rawLines[lineIdx], lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null) &&
         !isTableLine(rawLines[lineIdx]) &&
-        !isBulletLine(rawLines[lineIdx])
+        !isBulletLine(rawLines[lineIdx]) &&
+        !isExampleMarkerLine(rawLines[lineIdx]) &&
+        !isLevelClauseStart(rawLines[lineIdx], lineIdx + 1 < rawLines.length ? rawLines[lineIdx + 1] : null)
       ) {
         paraLines.push(rawLines[lineIdx]);
         lineIdx++;
-        // If a new clause starts inside, break to treat as distinct clause unit
         if (lineIdx < rawLines.length && isClauseStart(rawLines[lineIdx])) {
           break;
         }
       }
 
-      const paraText = paraLines.join(' ');
+      const paraText = paraLines.join('\n');
       if (!paraText.trim()) continue;
 
-      // Check if paragraph is within maxLen; if not, partition on sentence boundaries
+      const norm = normalizePersian(paraText);
+      const isCandidate = isCandidateUnit(paraText, keywords);
+
       if (paraText.length <= maxLen) {
-        const norm = normalizePersian(paraText);
         units.push({
           ordinal: ordinal++,
           page: page.page,
@@ -258,11 +369,10 @@ export function segmentDocument(
           unitType: isClause ? 'CLAUSE' : 'PARAGRAPH',
           spanStart: globalCharOffset,
           spanEnd: globalCharOffset + paraText.length,
-          isCandidate: isCandidateUnit(paraText, keywords),
+          isCandidate,
         });
         globalCharOffset += paraText.length + 1;
       } else {
-        // Large unit — partition strictly on sentence boundaries (spec §10)
         const sentences = splitSentences(paraText);
         let buffer: string[] = [];
         let bufferLen = 0;
@@ -270,13 +380,13 @@ export function segmentDocument(
         for (const sent of sentences) {
           if (bufferLen + sent.length > maxLen && buffer.length > 0) {
             const chunkText = buffer.join(' ');
-            const norm = normalizePersian(chunkText);
+            const chunkNorm = normalizePersian(chunkText);
             units.push({
               ordinal: ordinal++,
               page: page.page,
               sectionTitle: currentSectionTitle,
               text: chunkText,
-              normalizedText: norm,
+              normalizedText: chunkNorm,
               unitType: isClause ? 'CLAUSE' : 'PARAGRAPH',
               spanStart: globalCharOffset,
               spanEnd: globalCharOffset + chunkText.length,
@@ -292,13 +402,13 @@ export function segmentDocument(
 
         if (buffer.length > 0) {
           const chunkText = buffer.join(' ');
-          const norm = normalizePersian(chunkText);
+          const chunkNorm = normalizePersian(chunkText);
           units.push({
             ordinal: ordinal++,
             page: page.page,
             sectionTitle: currentSectionTitle,
             text: chunkText,
-            normalizedText: norm,
+            normalizedText: chunkNorm,
             unitType: isClause ? 'CLAUSE' : 'PARAGRAPH',
             spanStart: globalCharOffset,
             spanEnd: globalCharOffset + chunkText.length,

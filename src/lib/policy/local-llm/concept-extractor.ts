@@ -1,6 +1,7 @@
 // Policy Concept Extractor — Local LLM Implementation
 // (MIGRATION_PLAN_REVIEWED_v1.1 §2.4, spec §12, §13, §43, §71 Phase 2)
 
+import { extractExplicitRule, isPolicyMetadata } from '../ingestion/explicit-rule-extractor';
 import { OllamaClient } from './ollama-client';
 import { validateExtractedConcepts, type ExtractedConcept } from '../concepts/validator';
 import { filterConceptsByProvenance } from '../ingestion/provenance';
@@ -45,16 +46,20 @@ export const CONCEPT_EXTRACTION_SYSTEM_PROMPT = `
    - conditions: شروط یا استثناهای ذکرشده در متن (در صورت عدم وجود آرایه خالی [])
    - keywords: کلیدواژه‌های شاخص داخل متن
    - sourceQuote: نقل‌قول دقیق از متن که مبنای استخراج این مفهوم است
+۵. اگر متن ورودی بیش از یک سطح حساسیت/اقدام مجزا را توصیف می‌کند (مثلاً چند ردیف از یک جدول سطوح یا چند قاعدهٔ پشت‌سرهم)، برای هر سطح/قاعده یک «مفهوم» جداگانه با conceptKey و sourceQuote مخصوص به خودش تولید کن. هرگز چند قاعده را در یک مفهوم واحد ادغام نکن.
+۶. تعاریف ALLOW_EXTERNAL، LOCAL_ONLY و BLOCKED و توضیح هدف سند به تنهایی مفهوم محدودکننده نیستند. LOCAL_ONLY یعنی ROUTE_LOCAL، نه BLOCK. استثناها و نفی‌ها را عیناً در conditions حفظ کن. شناسه مفهوم باید با موضوع متن مطابقت داشته باشد.
+۷. sourceQuote باید کوتاه‌ترین بخش کافیِ متن باشد که مستقیماً مبنای همان یک مفهوم است — معمولاً یک جمله یا کمتر، نه کل واحد متنی ورودی.
 `.trim();
 
 export function buildConceptExtractionPrompt(unit: ConceptExtractionUnitInput): string {
   return `
-متن ورودی از سند سیاست امنیتی:
+${unit.sectionTitle ? `عنوان بخش سند: ${unit.sectionTitle}\n` : ''}متن ورودی از سند سیاست امنیتی:
 ---
-${unit.sectionTitle ? `بخش/عنوان: ${unit.sectionTitle}\n` : ''}${unit.text}
+${unit.text}
 ---
 
 بر اساس متن فوق، مفاهیم سیاست را استخراج کرده و فقط در قالب JSON زیر پاسخ دهید:
+(توجه: مقدار sourceQuote باید عیناً و کلمه‌به‌کلمه از داخل «متن ورودی از سند سیاست امنیتی» بالا باشد، بدون عنوان بخش):
 {
   "concepts": [
     {
@@ -62,7 +67,7 @@ ${unit.sectionTitle ? `بخش/عنوان: ${unit.sectionTitle}\n` : ''}${unit.te
       "name": "...",
       "nameFa": "...",
       "descriptionFa": "...",
-      "category": "...",
+      "category": "${unit.sectionTitle || 'امنیتی'}",
       "sensitivity": "CONFIDENTIAL",
       "action": "ROUTE_LOCAL",
       "positiveExamples": ["..."],
@@ -84,6 +89,11 @@ export class OllamaPolicyConceptExtractor implements PolicyConceptExtractor {
   }
 
   async extract(unit: ConceptExtractionUnitInput): Promise<PolicyConceptExtractionResult> {
+    if (isPolicyMetadata(unit.text, unit.sectionTitle)) {
+      return { unitId: unit.id, concepts: [], rejected: [], modelUsed: 'structured-policy' };
+    }
+    const explicit = extractExplicitRule(unit.text, unit.page);
+    if (explicit) return { unitId: unit.id, concepts: explicit, rejected: [], modelUsed: 'structured-policy' };
     const availability = await this.client.checkAvailability();
     if (!availability.available) {
       return {
@@ -104,7 +114,6 @@ export class OllamaPolicyConceptExtractor implements PolicyConceptExtractor {
     try {
       const gen = await this.client.generate(prompt, {
         system: CONCEPT_EXTRACTION_SYSTEM_PROMPT,
-        format: 'json',
         temperature: 0.1,
       });
       rawResponse = gen.response;

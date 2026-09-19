@@ -46,6 +46,10 @@ export class SemanticRetriever {
     // 1. Embed query
     const queryVector = await this.embeddingProvider.embed(normalized);
 
+    if (!queryVector.length || !queryVector.every(Number.isFinite) || !queryVector.some(v => v !== 0)) {
+      throw new Error('INVALID_QUERY_EMBEDDING');
+    }
+
     // 2. Vector search in store (scoped to active document if documentId omitted: AGENT_TASK §17)
     const results = await this.vectorStore.search(queryVector, {
       organizationId: options.organizationId,

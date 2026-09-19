@@ -51,6 +51,12 @@ export async function ingestDocumentConcepts(
   // 2. Segment document into structured units
   const segmented = segmentDocument(pages);
 
+  // Clean up previous PolicyUnits and unreviewed concepts for this document
+  await db.policyUnit.deleteMany({ where: { documentId } });
+  await db.policyConcept.deleteMany({
+    where: { documentId, reviewStatus: { in: ['REVIEW', 'DRAFT'] } },
+  });
+
   // 3. Persist PolicyUnits into database
   const createdUnits = await createPolicyUnits(
     segmented.map((u) => ({
@@ -69,7 +75,13 @@ export async function ingestDocumentConcepts(
 
   // 4. Prioritize candidate units for LLM extraction (spec §42)
   const candidateUnits = createdUnits.filter(
-    (u) => u.isCandidate || u.unitType === 'CLAUSE' || u.unitType === 'PARAGRAPH',
+    (u) =>
+      u.unitType !== 'HEADING' && (
+        u.isCandidate ||
+        u.unitType === 'CLAUSE' ||
+        u.unitType === 'PARAGRAPH' ||
+        (u.unitType === 'BULLET_GROUP' && u.text.length > 30)
+      ),
   );
 
   const extractor = options.extractor ?? new OllamaPolicyConceptExtractor();
@@ -115,13 +127,14 @@ export async function ingestDocumentConcepts(
             name: extracted.name,
             nameFa: extracted.nameFa,
             descriptionFa: extracted.descriptionFa,
-            category: extracted.category,
+            category: extracted.category || unit.sectionTitle,
             sensitivity: extracted.sensitivity,
             action: extracted.action,
             positiveExamples: extracted.positiveExamples,
             negativeExamples: extracted.negativeExamples,
             conditions: extracted.conditions,
             keywords: extracted.keywords,
+            flags: extracted.flags,
             sourceQuote: extracted.sourceQuote,
             sourcePage: extracted.sourcePage ?? unit.page,
             confidence: extracted.confidence,

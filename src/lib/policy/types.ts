@@ -111,6 +111,8 @@ export interface DetectionHit {
 export interface DetectionProcessingMeta {
   /** sha256 of the normalized input — never the raw text. */
   normalizedInputHash: string;
+  /** Hash of the exact serialized outgoing messages. */
+  egressPayloadHash?: string;
   durationMs: number;
   /** always false in this phase (Local LLM answering is a later phase). */
   localLlmUsed: boolean;
@@ -145,10 +147,13 @@ export interface DetectionOutcome {
   route?: 'EXTERNAL_DIRECT' | 'EXTERNAL_MASKED' | 'LOCAL' | 'BLOCKED';
   pipelineHealth?: 'HEALTHY' | 'DEGRADED' | 'FAILED';
   policyVersion?: number;
+  policyDocumentId?: string;
+  policyRevision?: string;
   retrievedConcepts?: Array<{
     conceptId: string;
     conceptKey: string;
     name: string;
+    category?: string | null;
     sensitivity: SensitivityLevel;
     action: ConceptAction;
     score: number;

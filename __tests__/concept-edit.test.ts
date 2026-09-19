@@ -647,6 +647,9 @@ describe('Admin Editable Semantic Concepts (§18 Requirements)', () => {
     const vec = await provider.embed(text);
     await vectorStore.upsertEmbedding(oldConcept.id, vec, provider.getModel(), textHash);
 
+    // Repair embeddings intentionally invalidated by earlier tests before testing scoping.
+    await vectorStore.rebuildIndex(TEST_ORG_A, TEST_DOC_ACTIVE, provider);
+
     // Perform hybrid retrieval with no documentId specified (runtime default mode)
     const retriever = new HybridRetriever(provider, vectorStore);
     const results = await retriever.retrieve('این مفهوم متعلق به نسخه سند قبلی است', {

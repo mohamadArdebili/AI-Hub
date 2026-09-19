@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import type { DetectionOutcome } from './types';
 import type { SanitizationReport } from './sanitizer';
 
@@ -45,20 +46,13 @@ export interface ExternalEgressValidationInput {
   expectedPolicyVersion?: number;
 }
 
-/**
- * Enhanced External Route Egress Guard (MIGRATION_PLAN_REVIEWED_v1.1 §6.1).
- * Validates external egress for both EXTERNAL_DIRECT and EXTERNAL_MASKED:
- * - EXTERNAL_DIRECT: verifies high-confidence SAFE decision, healthy pipeline, and zero critical hits.
- * - EXTERNAL_MASKED: requires isMaskedPayload=true, complete SanitizationReport, zero unresolved entities,
- *   and ensures raw sensitive prompt is never leaked to the external provider.
+/** Only a healthy, high-confidence SAFE decision authorizes unchanged external egress.
+ * Masked external sending remains disabled in this phase.
  */
 export function assertExternalEgressAllowed(input: ExternalEgressValidationInput): void {
   const {
     outcome,
     route,
-    isMaskedPayload,
-    sanitizationReport,
-    rawPrompt,
     egressPayload,
     expectedPolicyVersion,
   } = input;
@@ -71,15 +65,22 @@ export function assertExternalEgressAllowed(input: ExternalEgressValidationInput
     throw new ExternalRouteForbiddenError(route || outcome.decision);
   }
 
+  if (outcome.route && outcome.route !== route && route !== 'EXTERNAL') {
+    throw new ExternalRouteForbiddenError('Route contradicts detection outcome');
+  }
+
   // 3. Policy version validation if expected version is supplied
   if (
     expectedPolicyVersion !== undefined &&
-    outcome.policyVersion !== undefined &&
     outcome.policyVersion !== expectedPolicyVersion
   ) {
     throw new ExternalRouteForbiddenError(
       `Policy version mismatch (expected ${expectedPolicyVersion}, got ${outcome.policyVersion})`,
     );
+  }
+
+  if (outcome.processing.egressPayloadHash && crypto.createHash('sha256').update(egressPayload).digest('hex') !== outcome.processing.egressPayloadHash) {
+    throw new ExternalRouteForbiddenError('Payload changed after detection');
   }
 
   // 4. Critical security violations (private keys, jailbreaks) can NEVER egress under any route
@@ -93,7 +94,8 @@ export function assertExternalEgressAllowed(input: ExternalEgressValidationInput
 
   // 5. EXTERNAL_DIRECT (or legacy SAFE EXTERNAL)
   if (route === 'EXTERNAL_DIRECT' || route === 'EXTERNAL') {
-    if (outcome.decision !== 'SAFE') {
+    if (outcome.decision !== 'SAFE' || outcome.pipelineHealth !== 'HEALTHY' ||
+        outcome.classifier?.scope !== 'GENERAL' || (outcome.classifier?.confidence ?? 0) < 0.7 || outcome.hits.length > 0) {
       throw new ExternalRouteForbiddenError(
         `EXTERNAL_DIRECT requires SAFE decision, got ${outcome.decision}`,
       );
@@ -105,40 +107,8 @@ export function assertExternalEgressAllowed(input: ExternalEgressValidationInput
     return;
   }
 
-  // 6. EXTERNAL_MASKED
-  if (route === 'EXTERNAL_MASKED') {
-    if (!isMaskedPayload) {
-      throw new ExternalRouteForbiddenError(
-        'EXTERNAL_MASKED requires isMaskedPayload=true',
-      );
-    }
-    if (!sanitizationReport) {
-      throw new ExternalRouteForbiddenError(
-        'EXTERNAL_MASKED requires SanitizationReport',
-      );
-    }
-    if (!sanitizationReport.complete) {
-      throw new ExternalRouteForbiddenError(
-        'EXTERNAL_MASKED requires SanitizationReport.complete=true',
-      );
-    }
-    if (sanitizationReport.unresolvedEntities.length > 0) {
-      throw new ExternalRouteForbiddenError(
-        `EXTERNAL_MASKED has unresolved entities: [${sanitizationReport.unresolvedEntities.join(', ')}]`,
-      );
-    }
-    // Raw sensitive prompt must NEVER leak: if entities were masked, payload must not equal raw prompt
-    if (
-      rawPrompt &&
-      sanitizationReport.totalMasked > 0 &&
-      egressPayload === rawPrompt
-    ) {
-      throw new ExternalRouteForbiddenError(
-        'EXTERNAL_MASKED payload matches raw prompt despite sensitive findings (raw leak prevented)',
-      );
-    }
-    return;
-  }
+  // Masking alone cannot authorize external sending in this phase.
+  if (route === 'EXTERNAL_MASKED') throw new ExternalRouteForbiddenError('Masked egress is disabled');
 
   // Unknown route
   throw new ExternalRouteForbiddenError(`Unknown route "${route}"`);

@@ -394,12 +394,23 @@ export async function deletePolicyRule(id: string, organizationId: string): Prom
 export async function resetPolicyDocumentExtraction(documentId: string): Promise<{
   deletedChunks: number;
   deletedRules: number;
+  deletedUnits: number;
+  deletedConcepts: number;
 }> {
   const deletedChunks = await db.policyChunk.deleteMany({ where: { documentId } });
   const deletedRules = await db.policyRule.deleteMany({
     where: { documentId, isManual: false },
   });
-  return { deletedChunks: deletedChunks.count, deletedRules: deletedRules.count };
+  const deletedUnits = await db.policyUnit.deleteMany({ where: { documentId } });
+  const deletedConcepts = await db.policyConcept.deleteMany({
+    where: { documentId, reviewStatus: { in: ['REVIEW', 'DRAFT'] } },
+  });
+  return {
+    deletedChunks: deletedChunks.count,
+    deletedRules: deletedRules.count,
+    deletedUnits: deletedUnits.count,
+    deletedConcepts: deletedConcepts.count,
+  };
 }
 
 /**

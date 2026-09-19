@@ -2,6 +2,7 @@
 // (MIGRATION_PLAN_REVIEWED_v1.1 §5.4, spec §57, Rule 7, Rule 18)
 
 import crypto from 'crypto';
+import { withinDeadline } from './deadline';
 import { normalizePersian } from '../normalize';
 import { runDeterministicDlp, type DeterministicHit } from './deterministic-dlp';
 import { fuseEvidence } from './evidence-fusion';
@@ -26,6 +27,7 @@ export interface StageLatencies {
 
 export interface DetectionV2Input {
   prompt: string;
+  messages?: Array<{ role: 'user' | 'system' | 'assistant'; content: string }>;
   organizationId: string;
   compiledRules?: CompiledPolicyRule[];
   dictionaries?: {
@@ -39,6 +41,7 @@ export interface DetectionV2Input {
   timeoutBudgetMs?: number;
   minClassifierConfidence?: number;
   activePolicyVersion?: number;
+  documentId?: string;
 }
 
 export interface DetectionV2Result {
@@ -74,6 +77,9 @@ export async function runDetectionV2(input: DetectionV2Input): Promise<Detection
   let normalizedInputHash = '';
 
   try {
+    if (!Number.isFinite(timeoutBudgetMs) || timeoutBudgetMs <= 0 || input.prompt.length > 24000) {
+      throw new Error('INVALID_BUDGET_OR_CONTEXT_TOO_LARGE');
+    }
     // ── Stage 1: Persian Normalization ─────────────────────────────────────
     const normStart = Date.now();
     normalizedPrompt = normalizePersian(input.prompt);
@@ -87,8 +93,8 @@ export async function runDetectionV2(input: DetectionV2Input): Promise<Detection
     const dlpStart = Date.now();
     const dlpResult = runDeterministicDlp(
       {
-        prompt: input.prompt,
-        normalizedPrompt,
+        prompt: input.messages?.map(m => m.content).join('\n') ?? input.prompt,
+        normalizedPrompt: normalizePersian(input.messages?.map(m => m.content).join('\n') ?? input.prompt),
         compiledRules: input.compiledRules,
         dictionaries: input.dictionaries,
         sourceRef: input.sourceRef,
@@ -136,10 +142,12 @@ export async function runDetectionV2(input: DetectionV2Input): Promise<Detection
     let retrievalError: Error | null = null;
 
     try {
-      retrievedConcepts = await retriever.retrieve(normalizedPrompt, {
+      retrievedConcepts = await withinDeadline(retriever.retrieve(normalizedPrompt, {
         organizationId: input.organizationId,
+        documentId: input.documentId,
         topK: 5,
-      });
+      }), deadline);
+      if (retrievedConcepts.length === 0) throw new Error('NO_POLICY_COVERAGE');
     } catch (err) {
       retrievalError = err instanceof Error ? err : new Error(String(err));
       console.warn('[detection-pipeline-v2] hybrid retrieval warning:', retrievalError.message);
@@ -165,11 +173,11 @@ export async function runDetectionV2(input: DetectionV2Input): Promise<Detection
         error: 'DEADLINE_EXCEEDED',
       };
     } else {
-      semanticEvidence = await classifier.classify({
+      semanticEvidence = await withinDeadline(classifier.classify({
         prompt: input.prompt, // Raw prompt per spec §65
         candidateConcepts: retrievedConcepts,
         timeoutMs: remainingBudget,
-      });
+      }), deadline);
     }
     latencies.classifierMs = Date.now() - classStart;
 
@@ -203,6 +211,7 @@ export async function runDetectionV2(input: DetectionV2Input): Promise<Detection
         conceptId: r.concept.id,
         conceptKey: r.concept.conceptKey,
         name: r.concept.name,
+        category: r.concept.category ?? r.concept.sectionTitle ?? r.concept.nameFa ?? r.concept.name,
         sensitivity: r.concept.sensitivity,
         action: r.concept.action,
         score: r.score,

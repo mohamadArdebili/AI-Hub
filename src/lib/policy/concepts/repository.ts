@@ -22,6 +22,18 @@ import type {
   DetectorHints,
 } from './types';
 
+const CONCEPT_INCLUDE = {
+  examples: true,
+  sources: true,
+  embedding: true,
+  unit: {
+    select: {
+      sectionTitle: true,
+      ordinal: true,
+    },
+  },
+} as const;
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 export function sha256(text: string): string {
@@ -44,6 +56,7 @@ function toDomainConcept(record: any): PolicyConcept {
   const conditions = safeParseJson<string[]>(record.conditions, []);
   const keywords = safeParseJson<string[]>(record.keywords, []);
   const detectorHints = safeParseJson<DetectorHints | null>(record.detectorHints, null);
+  const flags = (detectorHints as any)?.flags ?? [];
 
   const rawExamples: any[] = record.examples ?? [];
   const positiveExamples = rawExamples
@@ -89,6 +102,7 @@ function toDomainConcept(record: any): PolicyConcept {
     organizationId: record.organizationId,
     documentId: record.documentId,
     unitId: record.unitId,
+    sectionTitle: record.unit?.sectionTitle ?? null,
     conceptKey: record.conceptKey,
     name: record.name,
     nameFa: record.nameFa,
@@ -101,6 +115,7 @@ function toDomainConcept(record: any): PolicyConcept {
     conditions,
     keywords,
     detectorHints,
+    flags,
     sourceQuote: record.sourceQuote,
     sourcePage: record.sourcePage,
     confidence: record.confidence,
@@ -163,6 +178,7 @@ export interface CreateConceptInput {
   conditions?: string[];
   keywords?: string[];
   detectorHints?: DetectorHints | null;
+  flags?: string[];
   sourceQuote: string;
   sourcePage?: number | null;
   confidence?: number;
@@ -228,6 +244,15 @@ export async function createConcept(data: CreateConceptInput): Promise<PolicyCon
     quoteHash: sha256(s.quote),
   }));
 
+  const detectorHintsObj: DetectorHints = {
+    ...(data.detectorHints || {}),
+  };
+  if (data.flags && data.flags.length > 0) {
+    detectorHintsObj.flags = data.flags;
+  }
+  const serializedDetectorHints =
+    Object.keys(detectorHintsObj).length > 0 ? JSON.stringify(detectorHintsObj) : null;
+
   const created = await db.policyConcept.create({
     data: {
       organizationId: data.organizationId,
@@ -242,7 +267,7 @@ export async function createConcept(data: CreateConceptInput): Promise<PolicyCon
       action: data.action as PrismaConceptAction,
       conditions: JSON.stringify(data.conditions ?? []),
       keywords: JSON.stringify(data.keywords ?? []),
-      detectorHints: data.detectorHints ? JSON.stringify(data.detectorHints) : null,
+      detectorHints: serializedDetectorHints,
       sourceQuote: data.sourceQuote,
       sourcePage: data.sourcePage ?? null,
       confidence: data.confidence ?? 0,
@@ -257,11 +282,7 @@ export async function createConcept(data: CreateConceptInput): Promise<PolicyCon
         create: sourceRecords,
       },
     },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return toDomainConcept(created);
@@ -281,11 +302,7 @@ export async function getConceptById(
 
   const record = await db.policyConcept.findFirst({
     where,
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return record ? toDomainConcept(record) : null;
@@ -303,11 +320,7 @@ export async function getConceptByKey(
     where: {
       documentId_conceptKey: { documentId, conceptKey },
     },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   if (!record || record.organizationId !== organizationId) {
@@ -337,11 +350,7 @@ export async function listConcepts(
   const records = await db.policyConcept.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return records.map(toDomainConcept);
@@ -363,17 +372,13 @@ export async function getActiveConcepts(
   if (options?.documentId) {
     where.documentId = options.documentId;
   } else if (options?.onlyActiveDocument) {
-    where.document = { isActive: true };
+    where.document = { isActive: true, lifecycle: 'ACTIVE' };
   }
 
   const records = await db.policyConcept.findMany({
     where,
     orderBy: { createdAt: 'desc' },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return records.map(toDomainConcept);
@@ -398,11 +403,7 @@ export async function approveConcept(
       reviewStatus: 'ACTIVE' as PrismaConceptReviewStatus,
       reviewNote: reviewNote !== undefined ? reviewNote : existing.reviewNote,
     },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return toDomainConcept(updated);
@@ -427,11 +428,7 @@ export async function rejectConcept(
       reviewStatus: 'REJECTED' as PrismaConceptReviewStatus,
       reviewNote: reviewNote !== undefined ? reviewNote : existing.reviewNote,
     },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return toDomainConcept(updated);
@@ -451,11 +448,7 @@ export async function archiveConcept(id: string, organizationId: string): Promis
     data: {
       reviewStatus: 'ARCHIVED' as PrismaConceptReviewStatus,
     },
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return toDomainConcept(updated);
@@ -508,11 +501,7 @@ export async function updateConcept(
   const updated = await db.policyConcept.update({
     where: { id },
     data: updateData,
-    include: {
-      examples: true,
-      sources: true,
-      embedding: true,
-    },
+    include: CONCEPT_INCLUDE,
   });
 
   return toDomainConcept(updated);

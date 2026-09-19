@@ -1,6 +1,7 @@
 // Deterministic DLP Layer
 // (MIGRATION_PLAN_REVIEWED_v1.1 §5.1, spec §57 Step 4 & 5, Rule 7)
 
+import { detectDeclaredSensitiveHits } from './declared-sensitive';
 import { normalizePersian } from '../normalize';
 import {
   detectBankCardHits,
@@ -22,8 +23,8 @@ export interface ScanContext {
 
 export interface DeterministicHit extends DetectionHit {
   /**
-   * True if platform baseline policy strictly forbids this from ever going external
-   * (e.g. private keys, connection strings, auth credentials, confirmed jailbreaks).
+   * True only for a platform rule that forbids generation (confirmed jailbreaks).
+   * Credentials forbid external processing but can still be processed locally.
    */
   alwaysBlock?: boolean;
   severity?: 'low' | 'medium' | 'high' | 'critical';
@@ -52,14 +53,11 @@ export interface DeterministicDlpResult {
 
 /** Categories that are platform baseline non-negotiable violations */
 const ALWAYS_BLOCK_CATEGORIES = new Set([
-  'private_key',
-  'credential',
-  'connection_string',
-  'api_key',
   'jailbreak_injection',
 ]);
 
 const CRITICAL_CATEGORIES = new Set([
+  'personal_contact',
   'national_id',
   'ir_bank_card',
   'iban',
@@ -110,13 +108,15 @@ export function runDeterministicDlp(
   runStep('checksum:iban', () => detectIbanHits(ctx));
 
   // 2. Builtin Regex & Patterns
+  runStep('regex:declared_values', () => detectDeclaredSensitiveHits(normalized));
   runStep('regex:secrets', () => detectSecretHits(ctx));
   runStep('regex:bulk_contact', () => detectBulkContactHits(ctx));
 
   // 3. Dictionaries
   if (input.dictionaries) {
     const dicts = {
-      seniorOfficers: input.dictionaries.seniorOfficers ?? [],
+      // A name alone is explicitly exempt; semantic rules evaluate its context.
+      seniorOfficers: [],
       telcoHubNodes: input.dictionaries.telcoHubNodes ?? [],
       proprietaryServices: input.dictionaries.proprietaryServices ?? [],
     };
@@ -145,12 +145,10 @@ export function runDeterministicDlp(
   // Annotate hits with baseline severity & alwaysBlock attributes
   const hits: DeterministicHit[] = rawHits.map((h) => {
     const isAlwaysBlock =
-      ALWAYS_BLOCK_CATEGORIES.has(h.category) ||
-      (input.compiledRules?.some(
-        (r) => r.id === h.ruleId && r.action === 'BLOCK_EXTERNAL',
-      ) ?? false);
+      ALWAYS_BLOCK_CATEGORIES.has(h.category);
 
-    const isCritical = CRITICAL_CATEGORIES.has(h.category) || isAlwaysBlock;
+    const isCritical = CRITICAL_CATEGORIES.has(h.category) || isAlwaysBlock ||
+      (input.compiledRules?.some((r) => r.id === h.ruleId && r.action === 'BLOCK_EXTERNAL') ?? false);
     const severity: DeterministicHit['severity'] = isCritical
       ? 'critical'
       : h.confidence >= 0.85

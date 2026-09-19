@@ -32,6 +32,8 @@ import { ingestDocumentConcepts } from '@/lib/policy/ingestion/concept-ingestion
 import type { RuleSeverity } from '@prisma/client';
 import crypto from 'crypto';
 
+import { reconstructPageText } from '@/lib/policy/ingestion/pdf-extractor';
+
 // ─── PDF Text Extraction ───────────────────────────────────────────────────
 
 /** Page-aware extraction — keeps provenance (1-based page number per text). */
@@ -45,11 +47,8 @@ export async function extractPdfPages(filePath: string): Promise<SourcePage[]> {
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
       const textContent = await page.getTextContent();
-      const items = textContent.items as Array<{ str?: string }>;
-      const pageText = items
-        .map((item) => item.str ?? '')
-        .join(' ')
-        .trim();
+      const items = textContent.items as Array<{ str?: string; hasEOL?: boolean; transform?: number[] }>;
+      const pageText = reconstructPageText(items);
       pages.push({ page: i, text: pageText });
     }
 

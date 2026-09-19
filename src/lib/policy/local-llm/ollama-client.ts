@@ -77,7 +77,9 @@ export function defaultOllamaConfig(): OllamaClientConfig {
 
 export interface GenerateOptions {
   temperature?: number;
-  format?: 'json' | string;
+  think?: boolean;
+  maxTokens?: number;
+  format?: 'json' | string | Record<string, unknown>;
   system?: string;
   timeoutMs?: number;
 }
@@ -108,7 +110,7 @@ export class OllamaClient {
     return { ...this.config };
   }
 
-  async checkAvailability(): Promise<LocalLlmAvailability> {
+  async checkAvailability(timeoutMs?: number): Promise<LocalLlmAvailability> {
     if (!this.config.enabled) {
       return { available: false, reason: 'DISABLED_BY_ENV' };
     }
@@ -121,7 +123,7 @@ export class OllamaClient {
     let result: LocalLlmAvailability;
     try {
       const url = `${this.config.baseUrl}/api/tags`;
-      const res = await this.transport.getJson(url, this.config.availabilityTimeoutMs);
+      const res = await this.transport.getJson(url, Math.min(timeoutMs ?? this.config.availabilityTimeoutMs, this.config.availabilityTimeoutMs));
 
       if (res.status !== 200 || !res.json || typeof res.json !== 'object') {
         result = { available: false, reason: 'UNREACHABLE' };
@@ -161,15 +163,25 @@ export class OllamaClient {
 
   async generate(prompt: string, options: GenerateOptions = {}): Promise<GenerateResult> {
     const timeout = options.timeoutMs ?? this.config.extractionTimeoutMs;
+    // UTF-8 bytes are a conservative upper bound on byte-level tokenizer tokens.
+    // Refuse oversized contexts instead of allowing Ollama to truncate old messages.
+    const contextTokens = 16384;
+    if (options.maxTokens && Buffer.byteLength(prompt + (options.system ?? ''), 'utf8') + options.maxTokens + 1024 > contextTokens) {
+      throw new Error('CLASSIFIER_CONTEXT_TOO_LARGE');
+    }
     const body: Record<string, unknown> = {
       model: this.config.model,
       prompt,
       stream: false,
       options: {
         temperature: options.temperature ?? 0.1,
+        ...(process.env.OLLAMA_NUM_GPU !== undefined && /^\d+$/.test(process.env.OLLAMA_NUM_GPU)
+          ? { num_gpu: Number(process.env.OLLAMA_NUM_GPU) } : {}),
+        ...(options.maxTokens ? { num_predict: options.maxTokens, num_ctx: contextTokens } : {}),
       },
     };
 
+    if (options.think !== undefined) body.think = options.think;
     if (options.format) {
       body.format = options.format;
     }

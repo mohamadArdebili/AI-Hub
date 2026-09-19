@@ -17,6 +17,67 @@ export interface ExtractPdfOptions {
 }
 
 /**
+ * Reconstructs lines of text from pdfjs text items using coordinates and hasEOL.
+ * Preserves RTL reading order within each line (descending X coordinates) and line breaks.
+ */
+export function reconstructPageText(
+  items: Array<{ str?: string; hasEOL?: boolean; transform?: number[] }>,
+): string {
+  const lines: Array<Array<{ str: string; transform: number[] }>> = [];
+  let current: Array<{ str: string; transform: number[] }> = [];
+
+  for (const it of items) {
+    const str = it.str ?? '';
+    const transform = it.transform ?? [1, 0, 0, 1, 0, 0];
+    const isEol = Boolean(it.hasEOL);
+
+    // Group items into lines: if vertical position changes noticeably, break into new line
+    if (current.length > 0) {
+      const prevY = current[current.length - 1].transform[5];
+      const currY = transform[5];
+      if (Math.abs(currY - prevY) > 4) {
+        lines.push(current);
+        current = [];
+      }
+    }
+
+    if (str.trim().length > 0) {
+      current.push({ str, transform });
+    }
+
+    if (isEol && current.length > 0) {
+      lines.push(current);
+      current = [];
+    }
+  }
+  if (current.length > 0) {
+    lines.push(current);
+  }
+
+  const renderedLines = lines
+    .map((lineItems) => {
+      // RTL reading order: sort tokens on each line by descending X coordinate
+      const sorted = [...lineItems].sort((a, b) => b.transform[4] - a.transform[4]);
+      return sorted
+        .map((i) => i.str)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    })
+    .filter((l) => l.length > 0);
+
+  // Clean trailing standalone numbering artifacts (.3, .2, etc. extracted at bottom of page)
+  while (
+    renderedLines.length > 0 &&
+    /^[.\d\u06F0-\u06F9\s\-–—]+$/.test(renderedLines[renderedLines.length - 1])
+  ) {
+    renderedLines.pop();
+  }
+
+  return renderedLines.join('\n');
+}
+
+/**
  * Page-aware extraction — preserves page numbers and text provenance.
  * Optionally applies Persian ligature reversal repair (repairPersianText).
  */
@@ -33,11 +94,12 @@ export async function extractPdfPages(
     for (let i = 1; i <= doc.numPages; i++) {
       const page = await doc.getPage(i);
       const textContent = await page.getTextContent();
-      const items = textContent.items as Array<{ str?: string }>;
-      const rawPageText = items
-        .map((item) => item.str ?? '')
-        .join(' ')
-        .trim();
+      const items = textContent.items as Array<{
+        str?: string;
+        hasEOL?: boolean;
+        transform?: number[];
+      }>;
+      const rawPageText = reconstructPageText(items);
 
       let finalText = rawPageText;
       let repairReport: PersianRepairReport | undefined;

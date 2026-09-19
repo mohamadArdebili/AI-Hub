@@ -31,6 +31,7 @@ export interface DetectorHints {
   regex?: string[];
   checksum?: string[];
   dictionary?: string[];
+  flags?: string[];
 }
 
 export interface PolicyConceptSourceRef {
@@ -71,6 +72,7 @@ export interface PolicyConcept {
   organizationId: string;
   documentId: string;
   unitId?: string | null;
+  sectionTitle?: string | null;
   conceptKey: string;
   name: string;
   nameFa?: string | null;
@@ -83,6 +85,7 @@ export interface PolicyConcept {
   conditions: string[];
   keywords: string[]; // hint only, not detection mechanism
   detectorHints?: DetectorHints | null;
+  flags?: string[];
   sourceQuote: string; // mandatory primary provenance quote
   sourcePage?: number | null;
   confidence: number;
@@ -135,6 +138,8 @@ export interface PolicyConceptMatch {
   conceptId: string;
   conceptKey: string;
   name: string;
+  nameFa?: string | null;
+  category?: string | null;
   sensitivity: SensitivityLevel;
   action: ConceptAction;
   score: number;

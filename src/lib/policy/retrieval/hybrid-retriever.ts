@@ -5,7 +5,7 @@ import { normalizePersian } from '../normalize';
 import { computeBM25 } from '../detectors';
 import type { PolicyConcept, RetrievedConcept } from '../concepts/types';
 import { getActiveConcepts } from '../concepts/repository';
-import { type EmbeddingProvider, OllamaEmbeddingProvider } from './embeddings';
+import { type EmbeddingProvider, OllamaEmbeddingProvider, buildConceptEmbeddingText, computeEmbeddingTextHash } from './embeddings';
 import { type VectorStore, PrismaVectorStore } from './vector-store';
 import { SemanticRetriever } from './semantic-retriever';
 
@@ -75,7 +75,16 @@ export class HybridRetriever {
     });
 
     if (activeConcepts.length === 0) {
-      return [];
+      throw new Error('NO_APPROVED_POLICY_CONCEPTS');
+    }
+    for (const concept of activeConcepts) {
+      const embedding = concept.embedding;
+      if (!embedding || embedding.model !== this.embeddingProvider.getModel() ||
+          embedding.dim !== this.embeddingProvider.getDimensions() || embedding.dim !== embedding.vector.length || !embedding.vector.length ||
+          !embedding.vector.every(Number.isFinite) || !embedding.vector.some(v => v !== 0) ||
+          embedding.textHash !== computeEmbeddingTextHash(buildConceptEmbeddingText(concept))) {
+        throw new Error('POLICY_INDEX_MISSING_OR_STALE');
+      }
     }
 
     // ── A. Dense Semantic Retrieval ──────────────────────────────────────────
@@ -89,8 +98,7 @@ export class HybridRetriever {
         minDenseScore: options.minDenseScore ?? 0, // Keep all candidates for RRF ranking
       });
     } catch (err) {
-      // In case embedding is offline or fails, continue with lexical (fail-graceful fusion)
-      console.warn('[hybrid-retriever] dense retrieval failed, falling back to lexical:', err);
+      throw new Error('DENSE_RETRIEVAL_FAILED', { cause: err });
     }
 
     // ── B. Lexical BM25 Retrieval ────────────────────────────────────────────
@@ -162,7 +170,14 @@ export class HybridRetriever {
     fused.sort((a, b) => b.rrfScore - a.rrfScore);
 
     // Return Top-K with rich scores
-    return fused.slice(0, topK).map((item) => ({
+    // Blocking rules must reach the judge even when retrieval ranks them lower.
+    const selected = fused.slice(0, topK);
+    for (const concept of activeConcepts.filter(c => c.action === 'BLOCK' || c.flags?.includes('ALWAYS_EVALUATE'))) {
+      if (!selected.some(item => item.concept.id === concept.id)) {
+        selected.push({ concept, denseScore: 0, lexicalScore: 0, rrfScore: 0 });
+      }
+    }
+    return selected.map((item) => ({
       concept: item.concept,
       score: item.rrfScore,
       denseScore: item.denseScore,

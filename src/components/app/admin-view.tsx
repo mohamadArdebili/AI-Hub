@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, Fragment } from "react";
+import { useState, useEffect, useRef, useCallback, Fragment, useMemo } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { authFetch } from "@/lib/api-client";
 import { ThemeToggle } from "@/components/chat/theme-toggle";
@@ -40,6 +40,7 @@ import {
   Archive,
   Cpu,
   RotateCcw,
+  AlertTriangle,
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
@@ -254,6 +255,7 @@ interface PolicyTestResult {
     conceptId: string;
     conceptKey: string;
     name: string;
+    category?: string | null;
     sensitivity: string;
     action: string;
     score: number;
@@ -2337,6 +2339,14 @@ function DecisionLogsTab() {
                       <TableCell className="hidden md:table-cell">
                         <div className="flex flex-col items-start gap-1">
                           {getRiskBadge(log.classifierRisk)}
+                          {log.classifierCategory && (
+                            <Badge
+                              variant="outline"
+                              className="text-[10px] px-1.5 py-0 font-normal border-border/80"
+                            >
+                              {log.classifierCategory}
+                            </Badge>
+                          )}
                           {Boolean(log.maskCount) && (
                             <span className="inline-flex items-center gap-1 text-[10px] text-amber-600 dark:text-amber-400">
                               <EyeOff className="size-3" />
@@ -2695,6 +2705,11 @@ function PolicyTesterTab() {
                         <Badge variant="outline" className="font-mono text-[10px]">
                           {c.conceptKey}
                         </Badge>
+                        {c.category && (
+                          <Badge variant="outline" className="text-[10px]">
+                            {c.category}
+                          </Badge>
+                        )}
                         <Badge
                           variant="secondary"
                           className={
@@ -3067,6 +3082,7 @@ interface ConceptItem {
   nameFa?: string | null;
   descriptionFa: string;
   category?: string | null;
+  sectionTitle?: string | null;
   sensitivity: "PUBLIC" | "INTERNAL" | "CONFIDENTIAL" | "HIGHLY_CONFIDENTIAL";
   action: "ALLOW_EXTERNAL" | "ROUTE_LOCAL" | "MASK_AND_ALLOW_EXTERNAL" | "BLOCK";
   reviewStatus: "DRAFT" | "REVIEW" | "ACTIVE" | "ARCHIVED" | "REJECTED";
@@ -3076,6 +3092,9 @@ interface ConceptItem {
   negativeExamples: string[];
   conditions: string[];
   keywords: string[];
+  detectorHints?: { regex?: string[]; checksum?: string[]; dictionary?: string[]; flags?: string[] } | null;
+  flags?: string[];
+  confidence?: number;
   reviewNote?: string | null;
   extractedByModel?: string | null;
   createdAt?: string;
@@ -3086,9 +3105,16 @@ function PolicyConceptsTab() {
   const [stats, setStats] = useState({ total: 0, active: 0, review: 0, rejected: 0, archived: 0 });
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
+  const [sortOrder, setSortOrder] = useState<"risk_first" | "newest" | "highest_confidence">("risk_first");
+  const [expandedQuotes, setExpandedQuotes] = useState<Record<string, boolean>>({});
   const [actionLoading, setActionLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
+
+  // Concept Rejection Dialog State (spec §2.5)
+  const [rejectingConcept, setRejectingConcept] = useState<ConceptItem | null>(null);
+  const [rejectionReason, setRejectionReason] = useState<string>("ادغام چند قاعده در یک مفهوم");
+  const [customRejectionNote, setCustomRejectionNote] = useState<string>("");
 
   // Concept Edit State (AGENT_TASK §12, §13)
   const [editingConcept, setEditingConcept] = useState<ConceptItem | null>(null);
@@ -3207,14 +3233,14 @@ function PolicyConceptsTab() {
     fetchConcepts();
   }, [fetchConcepts]);
 
-  const handleReviewAction = async (id: string, reviewAction: "approve" | "reject" | "archive") => {
+  const handleReviewAction = async (id: string, reviewAction: "approve" | "reject" | "archive", reviewNote?: string) => {
     try {
       setError(null);
       setActionLoading(id);
       const res = await authFetch(`/api/admin/concepts/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reviewAction }),
+        body: JSON.stringify({ reviewAction, reviewNote }),
       });
       if (!res.ok) {
         const data = await res.json().catch(() => ({}));
@@ -3227,6 +3253,17 @@ function PolicyConceptsTab() {
     } finally {
       setActionLoading(null);
     }
+  };
+
+  const handleConfirmReject = async () => {
+    if (!rejectingConcept) return;
+    const finalNote =
+      rejectionReason === "other"
+        ? customRejectionNote.trim()
+        : rejectionReason + (customRejectionNote.trim() ? ` — ${customRejectionNote.trim()}` : "");
+    await handleReviewAction(rejectingConcept.id, "reject", finalNote || "رد شده توسط ادمین");
+    setRejectingConcept(null);
+    setCustomRejectionNote("");
   };
 
   const handleDeleteConcept = async (id: string) => {
@@ -3254,12 +3291,42 @@ function PolicyConceptsTab() {
     }
   };
 
-  const getSensitivityBadge = (s: string) => {
+  const sortedConcepts = useMemo(() => {
+    const list = [...concepts];
+    if (sortOrder === "risk_first") {
+      return list.sort((a, b) => {
+        const aFlagsCount = (a.flags?.length || a.detectorHints?.flags?.length || 0);
+        const bFlagsCount = (b.flags?.length || b.detectorHints?.flags?.length || 0);
+        if (bFlagsCount !== aFlagsCount) return bFlagsCount - aFlagsCount;
+
+        const aConf = a.confidence ?? 0.8;
+        const bConf = b.confidence ?? 0.8;
+        if (aConf !== bConf) return aConf - bConf;
+
+        const aLen = a.sourceQuote?.length || 0;
+        const bLen = b.sourceQuote?.length || 0;
+        return bLen - aLen;
+      });
+    } else if (sortOrder === "highest_confidence") {
+      return list.sort((a, b) => (b.confidence ?? 0.8) - (a.confidence ?? 0.8));
+    } else {
+      return list.sort((a, b) => {
+        const aDate = a.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const bDate = b.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return bDate - aDate;
+      });
+    }
+  }, [concepts, sortOrder]);
+
+  const getSensitivityBadge = (s: string, action?: string) => {
+    if (action === "ROUTE_LOCAL") {
+      return <Badge className="bg-sky-600 hover:bg-sky-700 text-white">حساس</Badge>;
+    }
     switch (s) {
       case "HIGHLY_CONFIDENTIAL":
         return <Badge variant="destructive">بسیار محرمانه</Badge>;
       case "CONFIDENTIAL":
-        return <Badge className="bg-amber-600 hover:bg-amber-700">محرمانه</Badge>;
+        return <Badge className="bg-amber-600 hover:bg-amber-700 text-white">محرمانه</Badge>;
       case "INTERNAL":
         return <Badge variant="secondary">داخلی</Badge>;
       default:
@@ -3272,9 +3339,9 @@ function PolicyConceptsTab() {
       case "BLOCK":
         return <Badge variant="destructive">مسدودسازی کامل</Badge>;
       case "ROUTE_LOCAL":
-        return <Badge className="bg-blue-600 hover:bg-blue-700">مسیر محلی (LOCAL)</Badge>;
+        return <Badge className="bg-blue-600 hover:bg-blue-700 text-white">مسیر محلی (LOCAL)</Badge>;
       case "MASK_AND_ALLOW_EXTERNAL":
-        return <Badge className="bg-purple-600 hover:bg-purple-700">ماسک + خروج</Badge>;
+        return <Badge className="bg-purple-600 hover:bg-purple-700 text-white">ماسک + خروج</Badge>;
       default:
         return <Badge variant="outline">مجاز خارجی</Badge>;
     }
@@ -3342,8 +3409,18 @@ function PolicyConceptsTab() {
             </p>
           </div>
           <div className="flex items-center gap-2">
-            <Select value={statusFilter} onValueChange={setStatusFilter}>
+            <Select value={sortOrder} onValueChange={(val: any) => setSortOrder(val)}>
               <SelectTrigger className="h-8 w-36 text-xs">
+                <SelectValue placeholder="ترتیب نمایش" />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="risk_first">ریسک / پرچم‌ها</SelectItem>
+                <SelectItem value="highest_confidence">بیشترین اطمینان</SelectItem>
+                <SelectItem value="newest">جدیدترین</SelectItem>
+              </SelectContent>
+            </Select>
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger className="h-8 w-32 text-xs">
                 <SelectValue placeholder="فیلتر وضعیت" />
               </SelectTrigger>
               <SelectContent>
@@ -3372,23 +3449,54 @@ function PolicyConceptsTab() {
             </div>
           ) : (
             <div className="space-y-4">
-              {concepts.map((concept) => (
+              {sortedConcepts.map((concept) => {
+                const isQuoteExpanded = expandedQuotes[concept.id] ?? false;
+                const quote = concept.sourceQuote || "";
+                const isLongQuote = quote.length > 200;
+                const displayQuote = (!isQuoteExpanded && isLongQuote) ? quote.slice(0, 200) + "..." : quote;
+                const conceptFlags: string[] = concept.flags || concept.detectorHints?.flags || [];
+
+                return (
                 <div
                   key={concept.id}
                   className="rounded-lg border bg-card p-4 text-card-foreground shadow-xs transition-colors"
                 >
                   <div className="flex flex-wrap items-start justify-between gap-2 border-b pb-3">
                     <div>
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-2">
                         <span className="font-semibold">{concept.nameFa || concept.name}</span>
-                        <code className="text-xs text-muted-foreground">({concept.conceptKey})</code>
+                        <code dir="ltr" className="text-xs text-muted-foreground font-mono inline-block" style={{ unicodeBidi: "isolate" }}>
+                          ({concept.conceptKey})
+                        </code>
+                        {concept.sectionTitle && (
+                          <Badge variant="outline" className="text-[11px] border-blue-400/50 text-blue-600 dark:text-blue-400 font-normal">
+                            بخش: {concept.sectionTitle}
+                          </Badge>
+                        )}
+                        {conceptFlags.includes("LOOKS_TOO_BROAD") && (
+                          <Badge className="bg-amber-600 hover:bg-amber-700 text-white flex items-center gap-1 text-[10px]">
+                            <AlertTriangle className="size-3" />
+                            احتمال ادغام چند قاعده
+                          </Badge>
+                        )}
+                        {conceptFlags.includes("SENSITIVITY_ACTION_MISMATCH") && (
+                          <Badge className="bg-rose-600 hover:bg-rose-700 text-white flex items-center gap-1 text-[10px]">
+                            <AlertTriangle className="size-3" />
+                            عدم تطابق حساسیت و اقدام
+                          </Badge>
+                        )}
                       </div>
                       {concept.category && (
-                        <span className="text-xs text-muted-foreground">دسته: {concept.category}</span>
+                        <span className="text-xs text-muted-foreground mt-1 inline-block">دسته: {concept.category}</span>
                       )}
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
-                      {getSensitivityBadge(concept.sensitivity)}
+                      {concept.confidence !== undefined && (
+                        <Badge variant="secondary" className="text-[10px] font-mono">
+                          اطمینان: {Math.round(concept.confidence * 100)}%
+                        </Badge>
+                      )}
+                      {getSensitivityBadge(concept.sensitivity, concept.action)}
                       {getActionBadge(concept.action)}
                       {getStatusBadge(concept.reviewStatus)}
                     </div>
@@ -3397,13 +3505,38 @@ function PolicyConceptsTab() {
                   <div className="mt-3 space-y-2 text-xs">
                     <p className="text-muted-foreground leading-relaxed">{concept.descriptionFa}</p>
 
+                    {/* Rejection Note (if rejected) */}
+                    {concept.reviewStatus === "REJECTED" && concept.reviewNote && (
+                      <div className="rounded bg-rose-500/10 border border-rose-500/30 p-2 text-rose-700 dark:text-rose-400 text-xs">
+                        <span className="font-semibold">علت رد توسط ادمین: </span>
+                        {concept.reviewNote}
+                      </div>
+                    )}
+
                     {/* Provenance Quotation */}
                     <div className="rounded border-r-4 border-blue-500 bg-muted/60 p-2 text-xs">
                       <div className="flex items-center justify-between text-muted-foreground mb-1">
                         <span className="font-semibold text-blue-600 dark:text-blue-400">سند و نقل‌قول مبنا (Provenance):</span>
                         {concept.sourcePage && <span>صفحه: {concept.sourcePage}</span>}
                       </div>
-                      <blockquote className="italic text-foreground">«{concept.sourceQuote}»</blockquote>
+                      <blockquote className="italic text-foreground leading-relaxed">
+                        «{displayQuote}»
+                      </blockquote>
+                      {isLongQuote && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="mt-1 h-6 px-2 text-[11px] text-blue-600 hover:text-blue-700 dark:text-blue-400"
+                          onClick={() =>
+                            setExpandedQuotes((prev) => ({
+                              ...prev,
+                              [concept.id]: !isQuoteExpanded,
+                            }))
+                          }
+                        >
+                          {isQuoteExpanded ? "نمایش کمتر" : `نمایش کامل نقل‌قول (${quote.length} کاراکتر)`}
+                        </Button>
+                      )}
                     </div>
 
                     {/* Examples Preview */}
@@ -3489,7 +3622,7 @@ function PolicyConceptsTab() {
                         variant="default"
                         disabled={actionLoading === concept.id}
                         onClick={() => handleReviewAction(concept.id, "approve")}
-                        className="h-7 bg-emerald-600 text-xs hover:bg-emerald-700"
+                        className="h-7 bg-emerald-600 text-xs hover:bg-emerald-700 text-white"
                       >
                         {actionLoading === concept.id ? (
                           <Loader2 className="size-3 animate-spin" />
@@ -3504,7 +3637,11 @@ function PolicyConceptsTab() {
                         size="sm"
                         variant="outline"
                         disabled={actionLoading === concept.id}
-                        onClick={() => handleReviewAction(concept.id, "reject")}
+                        onClick={() => {
+                          setRejectingConcept(concept);
+                          setRejectionReason("ادغام چند قاعده در یک مفهوم");
+                          setCustomRejectionNote("");
+                        }}
                         className="h-7 text-xs text-destructive hover:bg-destructive/10"
                       >
                         {actionLoading === concept.id ? (
@@ -3517,7 +3654,8 @@ function PolicyConceptsTab() {
                     )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
         </CardContent>
@@ -3913,6 +4051,62 @@ function PolicyConceptsTab() {
               ) : (
                 "ذخیره تغییرات"
               )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Concept Rejection Dialog (spec §2.5) */}
+      <Dialog open={!!rejectingConcept} onOpenChange={(open) => { if (!open) setRejectingConcept(null); }}>
+        <DialogContent className="max-w-md" dir="rtl">
+          <DialogHeader>
+            <DialogTitle>رد مفهوم سیاست</DialogTitle>
+            <DialogDescription>
+              لطفاً دلیل رد مفهوم «{rejectingConcept?.nameFa || rejectingConcept?.name}» را مشخص کنید. این بازخورد به بهبود استخراج‌های بعدی مدل کمک می‌کند.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="space-y-3 py-2 text-xs">
+            <div className="space-y-1">
+              <label className="font-semibold block">دلیل رد:</label>
+              <Select value={rejectionReason} onValueChange={setRejectionReason}>
+                <SelectTrigger className="w-full text-xs">
+                  <SelectValue placeholder="انتخاب دلیل رد" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="ادغام چند قاعده در یک مفهوم">ادغام چند قاعده در یک مفهوم</SelectItem>
+                  <SelectItem value="دسته‌بندی نادرست">دسته‌بندی نادرست</SelectItem>
+                  <SelectItem value="سطح حساسیت اشتباه">سطح حساسیت اشتباه</SelectItem>
+                  <SelectItem value="تکراری">تکراری با مفهوم دیگر</SelectItem>
+                  <SelectItem value="نامرتبط">نامرتبط به سیاست امنیتی</SelectItem>
+                  <SelectItem value="other">سایر دلایل (توضیح در کادر زیر)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-1">
+              <label className="font-semibold block">توضیح تکمیلی یا بازخورد (اختیاری):</label>
+              <Textarea
+                value={customRejectionNote}
+                onChange={(e) => setCustomRejectionNote(e.target.value)}
+                placeholder="توضیح بیشتری بنویسید..."
+                className="text-xs min-h-[70px]"
+              />
+            </div>
+          </div>
+
+          <DialogFooter className="gap-2 sm:gap-0">
+            <Button variant="outline" size="sm" onClick={() => setRejectingConcept(null)}>
+              انصراف
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={actionLoading === rejectingConcept?.id}
+              onClick={handleConfirmReject}
+            >
+              {actionLoading === rejectingConcept?.id ? <Loader2 className="size-3 animate-spin ml-1" /> : null}
+              تأیید رد مفهوم
             </Button>
           </DialogFooter>
         </DialogContent>

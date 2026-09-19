@@ -48,6 +48,13 @@ export async function POST(
       );
     }
 
+    const { listConcepts } = await import('@/lib/policy/concepts/repository');
+    const concepts = await listConcepts(organizationId, { documentId: id });
+    if (!concepts.some(c => c.reviewStatus === 'ACTIVE') ||
+        concepts.some(c => c.reviewStatus === 'REVIEW' || c.reviewStatus === 'DRAFT')) {
+      return Response.json({ error: 'پیش از فعال‌سازی، مفاهیم را تأیید یا رد کنید؛ حداقل یک مفهوم تأییدشده لازم است.' }, { status: 409 });
+    }
+
     // ── Compile: ACTIVE-reviewable rules → runtime-optimized format ──
     const rules = await getPolicyRulesByDocument(id);
     const compilable: CompilableRule[] = rules
@@ -85,7 +92,12 @@ export async function POST(
     try {
       indexReport = await vectorStore.rebuildIndex(organizationId, id, embeddingProvider);
     } catch (indexErr) {
-      console.warn('[policy-activate] semantic index rebuild note (fail-closed if model unavailable):', indexErr);
+      console.warn('[policy-activate] index rebuild failed:', indexErr);
+      return Response.json({ error: 'ایندکس سیاست آماده نیست؛ فعال‌سازی انجام نشد.' }, { status: 503 });
+    }
+
+    if (indexReport.failed || indexReport.indexed !== concepts.filter(c => c.reviewStatus === 'ACTIVE').length) {
+      return Response.json({ error: 'ایندکس سیاست ناقص است؛ فعال‌سازی انجام نشد.' }, { status: 503 });
     }
 
     // ── Activate (deactivates + archives the previous active doc) ──

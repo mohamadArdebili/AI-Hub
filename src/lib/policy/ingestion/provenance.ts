@@ -1,7 +1,7 @@
 // Provenance Validator & Multi-Source Tracker
 // (MIGRATION_PLAN_REVIEWED_v1.1 §2.5, spec §13, §71 Phase 2, Rule 10)
 
-import { verifyQuoteProvenance } from '../concepts/validator';
+import { verifyQuoteProvenance, findBestMatchingSentence } from '../concepts/validator';
 import type { ExtractedConcept } from '../concepts/validator';
 import type { PolicyUnit } from '../concepts/types';
 
@@ -43,10 +43,18 @@ export function verifyConceptProvenance(
     };
   }
 
+  // If the quote had minor variations (e.g. dropped preposition), snap to exact sentence from unitText
+  if (!unitText.includes(concept.sourceQuote)) {
+    const best = findBestMatchingSentence(concept.sourceQuote, unitText);
+    if (best) {
+      concept.sourceQuote = best;
+    }
+  }
+
   return {
     valid: true,
     conceptKey: concept.conceptKey,
-    sourceQuote: quote,
+    sourceQuote: concept.sourceQuote,
   };
 }
 

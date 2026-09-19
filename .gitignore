@@ -92,3 +92,5 @@ Thumbs.db
 # Temporary phase/review documents
 phase*.md
 PHASE*.md
+docs/
+policy*.pdf

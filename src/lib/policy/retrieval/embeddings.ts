@@ -93,6 +93,8 @@ export class OllamaEmbeddingProvider implements EmbeddingProvider {
         body: JSON.stringify({
           model: this.config.model,
           prompt: text,
+          ...(process.env.OLLAMA_NUM_GPU !== undefined && /^\d+$/.test(process.env.OLLAMA_NUM_GPU)
+            ? { options: { num_gpu: Number(process.env.OLLAMA_NUM_GPU) } } : {}),
         }),
         signal: controller.signal,
       });

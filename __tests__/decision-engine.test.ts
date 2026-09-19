@@ -55,7 +55,7 @@ describe('Action-Aware Decision Engine', () => {
     expect(res.outcome.route).toBe('BLOCKED');
   });
 
-  it('routes to EXTERNAL_MASKED when precedenceAction is MASK_AND_ALLOW_EXTERNAL', () => {
+  it('routes masked policy actions locally in this phase', () => {
     const input: DecisionEngineInput = {
       fusedEvidence: {
         ...baseFusedEvidence,
@@ -69,10 +69,10 @@ describe('Action-Aware Decision Engine', () => {
     };
 
     const res = decidePolicyRoute(input);
-    expect(res.route).toBe('EXTERNAL_MASKED');
+    expect(res.route).toBe('LOCAL');
     expect(res.decision).toBe('SENSITIVE');
-    expect(res.action).toBe('EXTERNAL_ALLOWED');
-    expect(res.outcome.route).toBe('EXTERNAL_MASKED');
+    expect(res.action).toBe('LOCAL_ONLY');
+    expect(res.outcome.route).toBe('LOCAL');
   });
 
   it('routes strictly to LOCAL on UNCERTAIN, degraded health, unknown scope, or low confidence (fail-closed)', () => {

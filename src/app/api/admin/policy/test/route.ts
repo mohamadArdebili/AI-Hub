@@ -1,13 +1,10 @@
 import { NextRequest } from 'next/server';
 import { requireAdmin } from '@/lib/auth';
-import { evaluate } from '@/lib/policy';
-import { isCriticalHitSet, CATEGORIES } from '@/lib/policy/classifier';
-import { runDetection } from '@/lib/policy/detection-pipeline';
+import { CATEGORIES } from '@/lib/policy/classifier';
+import { detectConversation } from '@/lib/policy/conversation';
 import { sanitizePrompt, MASK_LABELS } from '@/lib/policy/sanitizer';
 import {
-  getPolicySnapshot,
   getActiveMaskTerms,
-  getActiveCompiledRules,
 } from '@/lib/db';
 import type { DetectionOutcome } from '@/lib/policy/types';
 
@@ -71,6 +68,7 @@ export interface PolicyTestResult {
     conceptId: string;
     conceptKey: string;
     name: string;
+    category?: string | null;
     sensitivity: string;
     action: string;
     score: number;
@@ -156,42 +154,8 @@ export async function POST(request: NextRequest) {
     const dictionaries = await getActiveMaskTerms(organizationId);
     const sanitized = sanitizePrompt(prompt, dictionaries);
 
-    // ── لایه ۲: سازگاری عقبی موتور قواعد (legacy preview) ───────────────
-    const policySnapshot = await getPolicySnapshot(organizationId);
-    const decision = await evaluate({
-      prompt,
-      organizationId,
-      policySnapshot,
-    });
-
-    // ── لایه ۳: پایپ‌لاین تشخیص پیشرفته (DLP + Retrieval + Local LLM Semantic Classifier) ─
-    const compiledRules = await getActiveCompiledRules(organizationId);
-    const outcome: DetectionOutcome = await runDetection({
-      prompt,
-      compiledRules,
-      dictionaries,
-      organizationId,
-    });
-
-    // Final route resolution
-    let finalRoute: PolicyTestResult['finalRoute'] =
-      outcome.route ??
-      (outcome.decision === 'SAFE'
-        ? 'EXTERNAL_DIRECT'
-        : outcome.action === 'EXTERNAL_ALLOWED'
-        ? 'EXTERNAL_MASKED'
-        : 'LOCAL');
-
-    if (
-      outcome.decision === 'SENSITIVE' &&
-      finalRoute !== 'EXTERNAL_MASKED' &&
-      isCriticalHitSet(
-        outcome.hits,
-        new Map(compiledRules.map((r) => [r.id, r.action])),
-      )
-    ) {
-      finalRoute = 'BLOCKED';
-    }
+    const outcome: DetectionOutcome = await detectConversation([{ role: 'user', content: prompt }], organizationId);
+    const finalRoute: PolicyTestResult['finalRoute'] = outcome.route ?? 'LOCAL';
 
     const deterministicHits = outcome.hits.map((h) => ({
       detectorType: h.detectorType,
@@ -206,6 +170,7 @@ export async function POST(request: NextRequest) {
       conceptId: c.conceptId,
       conceptKey: c.conceptKey,
       name: c.name,
+      category: 'category' in c ? (c as { category?: string | null }).category ?? null : null,
       sensitivity: c.sensitivity,
       action: c.action,
       score: c.score,
@@ -248,23 +213,24 @@ export async function POST(request: NextRequest) {
       classifier,
       stageLatencies: outcome.stageLatencies,
       engine: {
-        action: decision.action,
-        score: decision.score,
-        reasons: decision.reasons,
-        matchedRules: decision.matchedRules.map((r) => ({
-          code: r.code,
-          title: r.title,
-          severity: r.severity,
+        action: finalRoute === 'BLOCKED' ? 'BLOCK' : 'ALLOW',
+        score: outcome.decision === 'SAFE' ? 0 : 1,
+        reasons: outcome.reason ? [outcome.reason] : [],
+        matchedRules: (outcome.matchedConcepts ?? []).map(c => ({
+          code: c.conceptKey, title: c.name, severity: c.sensitivity,
         })),
-        latencyMs: Math.round(decision.latencyMs),
-        engineVersion: decision.engineVersion,
-        hasActiveDocument: policySnapshot !== null,
+        latencyMs: outcome.processing.durationMs,
+        engineVersion: PIPELINE_VERSION,
+        hasActiveDocument: Boolean(outcome.policyDocumentId),
       },
       detection: {
         decision: outcome.decision,
         action: outcome.action,
-        hitCount: outcome.hits.length,
-        hitLabels: Array.from(new Set(outcome.hits.map(hitLabel))),
+        hitCount: outcome.hits.length + (outcome.matchedConcepts?.length ?? 0),
+        hitLabels: Array.from(new Set([
+          ...outcome.hits.map(hitLabel),
+          ...(outcome.matchedConcepts ?? []).map(c => ('category' in c && c.category ? c.category : c.name)),
+        ].filter((x): x is string => Boolean(x && x.trim())))),
         durationMs: outcome.processing.durationMs,
         reason: outcome.reason ?? '',
       },

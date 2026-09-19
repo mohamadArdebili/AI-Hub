@@ -724,7 +724,11 @@ export function detectSecretHits(ctx: ScanContext): DetectionHit[] {
       scanOriginal: true,
     });
   }
-  return hits;
+  return hits.filter(hit => {
+    if (hit.category !== 'credential') return true;
+    const value = hit.matchedSpan.text.split(/[=:]/).slice(1).join(':').trim().replace(/["',;]+$/g, '');
+    return !/^<?(?:PASSWORD|API_KEY|TOKEN|SECRET)>?$/i.test(value);
+  });
 }
 
 /** Bulk contact info (3+ emails or 3+ mobile numbers) — legacy semantic port. */

@@ -146,11 +146,11 @@ describe('HybridRetriever and RRF Ranking', () => {
     }
   });
 
-  it('tolerates dense layer failure and gracefully falls back to lexical BM25 ranking', async () => {
+  it('reports dense failure instead of authorizing from lexical results alone', async () => {
     // A broken embedding provider that fails
     const brokenProvider = {
-      getModel: () => 'broken',
-      getDimensions: () => 0,
+      getModel: () => 'test-embed',
+      getDimensions: () => 32,
       embed: async () => {
         throw new Error('Connection refused to Ollama');
       },
@@ -162,14 +162,8 @@ describe('HybridRetriever and RRF Ranking', () => {
     const vectorStore = new PrismaVectorStore();
     const retriever = new HybridRetriever(brokenProvider, vectorStore);
 
-    const results = await retriever.retrieve('رمز عبور پایگاه داده', {
-      organizationId: TEST_ORG_ID,
-      documentId: TEST_DOC_ID,
-      topK: 5,
-    });
-
-    expect(results.length).toBeGreaterThan(0);
-    expect(results[0].concept.conceptKey).toBe('database_credentials');
-    expect(results[0].lexicalScore).toBeGreaterThan(0);
+    await expect(retriever.retrieve('رمز عبور پایگاه داده', {
+      organizationId: TEST_ORG_ID, documentId: TEST_DOC_ID, topK: 5,
+    })).rejects.toThrow('DENSE_RETRIEVAL_FAILED');
   });
 });

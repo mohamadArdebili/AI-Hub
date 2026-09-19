@@ -31,6 +31,7 @@ export const DetectorHintsSchema = z
     regex: z.array(z.string()).optional(),
     checksum: z.array(z.string()).optional(),
     dictionary: z.array(z.string()).optional(),
+    flags: z.array(z.string()).optional(),
   })
   .partial();
 
@@ -64,6 +65,7 @@ export const ExtractedConceptSchema = z.object({
     .min(1, 'sourceQuote is mandatory and must not be empty (spec §13, Rule 10)'),
   sourcePage: z.number().int().positive().nullable().optional(),
   confidence: z.number().min(0).max(1).default(1.0),
+  flags: z.array(z.string()).optional(),
 });
 
 export type ExtractedConcept = z.infer<typeof ExtractedConceptSchema>;
@@ -110,13 +112,41 @@ export const ExtractedConceptsEnvelopeSchema = z.union([
  * Verifies that a quote exists within the source unit text.
  * Performs both exact substring check and Persian-normalized substring check.
  */
+export function findBestMatchingSentence(quote: string, text: string): string | null {
+  let cleanQuote = quote.trim().replace(/^[«"']+|[»"']+$/g, '').trim();
+  cleanQuote = cleanQuote.replace(/^بخش\/عنوان:\s*[^\n]+\n*/i, '').trim();
+  const normQuote = normalizePersian(cleanQuote);
+  const quoteWords = normQuote.split(/\s+/).filter((w) => w.length > 1);
+  if (quoteWords.length === 0) return null;
+
+  const chunks = text.split(/[\n.!؟؛]+/).map((s) => s.trim()).filter((s) => s.length > 5);
+  let bestChunk: string | null = null;
+  let bestScore = 0;
+
+  for (const chunk of chunks) {
+    const normChunk = normalizePersian(chunk);
+    const chunkWords = new Set(normChunk.split(/\s+/));
+    const matchCount = quoteWords.filter((w) => chunkWords.has(w)).length;
+    const score = matchCount / quoteWords.length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestChunk = chunk;
+    }
+  }
+
+  return bestScore >= 0.7 ? bestChunk : null;
+}
+
 export function verifyQuoteProvenance(sourceQuote: string, sourceText: string): boolean {
-  const cleanQuote = sourceQuote.trim();
+  let cleanQuote = sourceQuote.trim().replace(/^[«"']+|[»"']+$/g, '').trim();
   const cleanText = sourceText.trim();
 
   if (!cleanQuote || !cleanText) {
     return false;
   }
+
+  // If quote starts with "بخش/عنوان: ...", strip the header part
+  cleanQuote = cleanQuote.replace(/^بخش\/عنوان:\s*[^\n]+\n*/i, '').trim();
 
   // 1. Direct substring match
   if (cleanText.includes(cleanQuote)) {
@@ -134,6 +164,12 @@ export function verifyQuoteProvenance(sourceQuote: string, sourceText: string): 
   // 3. Relaxed whitespace match
   const collapseWhitespace = (s: string) => s.replace(/\s+/g, ' ').trim();
   if (collapseWhitespace(normText).includes(collapseWhitespace(normQuote))) {
+    return true;
+  }
+
+  // 4. Token overlap match
+  const best = findBestMatchingSentence(cleanQuote, cleanText);
+  if (best) {
     return true;
   }
 
@@ -166,8 +202,27 @@ export function validateExtractedConcepts(
   let candidates: unknown[] = [];
 
   if (typeof input === 'string') {
+    let clean = input.trim();
+    // Strip <think>...</think> from reasoning models
+    clean = clean.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+    // Strip markdown code block fences if present
+    if (clean.includes('```')) {
+      const match = clean.match(/```(?:json)?\s*([\s\S]*?)\s*```/i);
+      if (match) {
+        clean = match[1].trim();
+      }
+    }
+    // Extract outermost { ... } or [ ... ] if surrounded by conversational text
+    const jsonStart = clean.search(/[\[{]/);
+    const jsonEndBrace = clean.lastIndexOf('}');
+    const jsonEndBracket = clean.lastIndexOf(']');
+    const jsonEnd = Math.max(jsonEndBrace, jsonEndBracket);
+    if (jsonStart !== -1 && jsonEnd > jsonStart) {
+      clean = clean.slice(jsonStart, jsonEnd + 1);
+    }
+
     try {
-      input = JSON.parse(input);
+      input = JSON.parse(clean);
     } catch (e) {
       return {
         valid: [],
@@ -184,6 +239,8 @@ export function validateExtractedConcepts(
       candidates = obj.concepts;
     } else if (Array.isArray(obj.rules)) {
       candidates = obj.rules;
+    } else if (Object.keys(obj).length === 0) {
+      candidates = [];
     } else {
       // Single concept object
       candidates = [obj];
@@ -219,6 +276,32 @@ export function validateExtractedConcepts(
       }
     }
 
+    const flags: string[] = Array.isArray(concept.flags) ? [...concept.flags] : [];
+
+    // 1. Quote length & ratio check (spec §2.3)
+    if (options?.sourceText) {
+      const quoteRatio = concept.sourceQuote.length / (options.sourceText.length || 1);
+      const looksTooBroad = concept.sourceQuote.length > 350 || (quoteRatio > 0.6 && concept.sourceQuote.length > 150);
+      if (looksTooBroad && !flags.includes('LOOKS_TOO_BROAD')) {
+        flags.push('LOOKS_TOO_BROAD');
+      }
+    } else if (concept.sourceQuote.length > 350) {
+      if (!flags.includes('LOOKS_TOO_BROAD')) {
+        flags.push('LOOKS_TOO_BROAD');
+      }
+    }
+
+    // 2. Consistency check between sensitivity and action (spec §2.4)
+    const isMismatch =
+      (concept.sensitivity === 'HIGHLY_CONFIDENTIAL' && (concept.action === 'ALLOW_EXTERNAL' || concept.action === 'MASK_AND_ALLOW_EXTERNAL')) ||
+      (concept.sensitivity === 'CONFIDENTIAL' && concept.action === 'ALLOW_EXTERNAL') ||
+      (concept.sensitivity === 'PUBLIC' && (concept.action === 'BLOCK' || concept.action === 'ROUTE_LOCAL'));
+
+    if (isMismatch && !flags.includes('SENSITIVITY_ACTION_MISMATCH')) {
+      flags.push('SENSITIVITY_ACTION_MISMATCH');
+    }
+
+    concept.flags = flags;
     valid.push(concept);
   }
 

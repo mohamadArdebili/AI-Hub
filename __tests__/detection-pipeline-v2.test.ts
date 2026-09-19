@@ -113,7 +113,7 @@ describe('V2 Detection Pipeline (runDetectionV2)', () => {
     expect(outcome.processing.externalLlmInvoked).toBe(false);
   });
 
-  it('short-circuits immediately on platform baseline violation without calling LLM', async () => {
+  it('keeps a private key local instead of blocking generation', async () => {
     const outcome = await runDetectionV2({
       prompt: 'کلید خصوصی من: -----BEGIN RSA PRIVATE KEY----- MIIEowIBAAKCAQEA...',
       organizationId: 'org-test',
@@ -121,12 +121,12 @@ describe('V2 Detection Pipeline (runDetectionV2)', () => {
       hybridRetriever: mockRetriever,
     });
 
-    expect(outcome.route).toBe('BLOCKED');
+    expect(outcome.route).toBe('LOCAL');
     expect(outcome.action).toBe('LOCAL_ONLY');
     expect(outcome.hits.some((h) => h.category === 'private_key')).toBe(true);
 
-    // Verify that the mock classifier was NOT called (short-circuit optimization!)
-    expect(mockClassifier.callHistory).toHaveLength(0);
+    // Local-only credentials still permit semantic classification.
+    expect(mockClassifier.callHistory).toHaveLength(1);
   });
 
   it('fails closed to LOCAL/UNCERTAIN when timeout budget expires', async () => {
@@ -168,6 +168,7 @@ describe('POLICY_SEMANTIC_ENABLED Switch (runDetection dispatcher)', () => {
       dictionaries: { seniorOfficers: [], telcoHubNodes: [], proprietaryServices: [] },
       organizationId: 'org-test',
       classifier: mockClassifier,
+      hybridRetriever: { retrieve: async () => [{ concept: { id: 'test', conceptKey: 'test', action: 'ROUTE_LOCAL', sensitivity: 'CONFIDENTIAL' }, score: 1 }] } as unknown as HybridRetriever,
     });
 
     expect(outcome.decision).toBe('SAFE');

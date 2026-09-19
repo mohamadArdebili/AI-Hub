@@ -4,10 +4,6 @@ import { useCallback, useRef, useState } from "react";
 import type { ChatMessage, ChatStreamChunk } from "@/lib/chat-types";
 import { authFetch } from "@/lib/api-client";
 
-const SYSTEM_PROMPT =
-  "تو یک دستیار هوشمند و حرفه‌ای هستی که به کاربران سازمانی کمک می‌کنی. " +
-  "به زبان کاربر (فارسی یا انگلیسی) پاسخ بده و پاسخ‌ها را واضح، دقیق و ساختاریافته ارائه کن. " +
-  "در صورت نیاز از فرمت Markdown و بلوک‌های کد استفاده کن.";
 
 let idCounter = 0;
 const genId = () => `m_${Date.now()}_${idCounter++}`;
@@ -28,6 +24,8 @@ export interface UseChatReturn {
 export function useChat(): UseChatReturn {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
+  const messagesRef = useRef<ChatMessage[]>([]);
+  messagesRef.current = messages;
   const abortRef = useRef<AbortController | null>(null);
 
   const stop = useCallback(() => {
@@ -66,18 +64,15 @@ export function useChat(): UseChatReturn {
       pending: true,
     };
 
-    // Build the conversation history to send (including the system prompt).
+    // Build the conversation history to send synchronously.
     const history: Array<{ role: "system" | "user" | "assistant"; content: string }> = [
-      { role: "system", content: SYSTEM_PROMPT },
+      ...messagesRef.current
+        .filter((m) => !m.error && !m.pending)
+        .map((m) => ({ role: m.role, content: m.content })),
+      { role: "user", content: trimmed },
     ];
-    setMessages((prev) => {
-      for (const m of prev) {
-        if (m.error) continue;
-        history.push({ role: m.role, content: m.content });
-      }
-      history.push({ role: "user", content: trimmed });
-      return [...prev, userMsg, assistantMsg];
-    });
+
+    setMessages((prev) => [...prev, userMsg, assistantMsg]);
 
     setIsStreaming(true);
     const controller = new AbortController();

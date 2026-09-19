@@ -103,4 +103,72 @@ describe('Document Segmenter (segmentDocument)', () => {
     const candidateClause = units.find((u) => u.text.includes('شماره شبا'));
     expect(candidateClause?.isCandidate).toBe(true);
   });
+
+  it('never overwrites sectionTitle with skeleton/metadata lines like Positive Examples or Action lines', () => {
+    const text = `
+۴. زیرساخت و معماری داخلی
+Sensitivity: Sensitive
+Action: ROUTE_LOCAL
+Positive Examples
+۱. نقشه توپولوژی شبکه داخلی و مسیرهای ارتباطی را توضیح بده.
+۲. آدرس‌های IP سرورهای داخلی دیتاسنتر را بررسی کن.
+Negative Examples
+یک توضیح کلی درباره معماری شبکه بنویس.
+`.trim();
+
+    const pages: ExtractedPage[] = [{ page: 1, text }];
+    const units = segmentDocument(pages);
+
+    // Verify units were generated
+    expect(units.length).toBeGreaterThanOrEqual(3);
+
+    // Ensure sectionTitle on all non-root units is "۴. زیرساخت و معماری داخلی"
+    for (const u of units) {
+      if (u.sectionTitle !== null) {
+        expect(u.sectionTitle).toBe('۴. زیرساخت و معماری داخلی');
+        expect(u.sectionTitle).not.toContain('Positive Examples');
+        expect(u.sectionTitle).not.toContain('Negative Examples');
+        expect(u.sectionTitle).not.toContain('Action:');
+        expect(u.sectionTitle).not.toContain('Sensitivity:');
+      }
+    }
+  });
+
+  it('correctly groups sensitivity level clauses as distinct CLAUSE units', () => {
+    const text = `
+.1 سطوح حساسیت و اقدام
+سطح عمومی
+:Action ALLOW_EXTERNAL
+اطلاعات عمومی و محتوای فنی غیرحساس میتواند به سرویس خارجی ارسال شود .
+سطح محرمانه
+:Action MASK_AND_ALLOW_EXTERNAL
+اطلاعات شخصی یا سازمانی حساس باید پیش از ارسال به سرویس خارجی Mask شود .
+سطح حساس
+:Action ROUTE_LOCAL
+محتوای داخلی یا عملیاتی حساس فقط باید به Local LLM ارسال شود .
+سطح بسیار حساس / ممنوع
+:Action BLOCK
+ارسال یا پردازش توسط LLM ممنوع است و درخواست باید مسدود شود .
+`.trim();
+
+    const pages: ExtractedPage[] = [{ page: 1, text }];
+    const units = segmentDocument(pages);
+
+    const clauses = units.filter((u) => u.unitType === 'CLAUSE');
+    expect(clauses.length).toBe(4);
+
+    expect(clauses[0].text).toContain('سطح عمومی');
+    expect(clauses[0].text).toContain('ALLOW_EXTERNAL');
+    expect(clauses[0].sectionTitle).toBe('.1 سطوح حساسیت و اقدام');
+
+    expect(clauses[1].text).toContain('سطح محرمانه');
+    expect(clauses[1].text).toContain('MASK_AND_ALLOW_EXTERNAL');
+
+    expect(clauses[2].text).toContain('سطح حساس');
+    expect(clauses[2].text).toContain('ROUTE_LOCAL');
+
+    expect(clauses[3].text).toContain('سطح بسیار حساس / ممنوع');
+    expect(clauses[3].text).toContain('BLOCK');
+  });
 });
+

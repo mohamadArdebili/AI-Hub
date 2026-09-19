@@ -34,7 +34,10 @@ export function decidePolicyRoute(input: DecisionEngineInput): DecisionEngineRes
   let reason: string;
 
   // 1. BLOCK: Non-negotiable precedence (spec §4.2 B & C)
-  if (fusedEvidence.precedenceAction === 'BLOCK') {
+  if (fusedEvidence.precedenceAction === 'BLOCK' &&
+      (fusedEvidence.deterministicHits.some(h => h.alwaysBlock) ||
+       (fusedEvidence.pipelineHealth === 'HEALTHY' && fusedEvidence.semanticConfidence >= minConfidence &&
+        fusedEvidence.semanticDecision === 'SENSITIVE'))) {
     route = 'BLOCKED';
     decision = 'SENSITIVE';
     reason =
@@ -46,7 +49,8 @@ export function decidePolicyRoute(input: DecisionEngineInput): DecisionEngineRes
     fusedEvidence.pipelineHealth !== 'HEALTHY' ||
     fusedEvidence.hasCriticalConflict ||
     fusedEvidence.semanticDecision === 'UNCERTAIN' ||
-    fusedEvidence.semanticScope === 'UNKNOWN'
+    fusedEvidence.semanticScope === 'UNKNOWN' ||
+    fusedEvidence.semanticConfidence < minConfidence
   ) {
     route = 'LOCAL';
     decision = fusedEvidence.semanticDecision === 'UNCERTAIN' ? 'UNCERTAIN' : 'SENSITIVE';
@@ -56,11 +60,11 @@ export function decidePolicyRoute(input: DecisionEngineInput): DecisionEngineRes
   }
   // 3. MASK_AND_ALLOW_EXTERNAL: Explicit policy action
   else if (fusedEvidence.precedenceAction === 'MASK_AND_ALLOW_EXTERNAL') {
-    route = 'EXTERNAL_MASKED';
+    route = 'LOCAL';
     decision = 'SENSITIVE';
     reason =
       fusedEvidence.reasons[0] ??
-      'درخواست پس از ماسک‌گذاری داده‌های حساس، به مدل خارجی ارسال خواهد شد';
+      'ارسال پس از ماسک‌گذاری در این مرحله مجاز نیست؛ ارجاع به مسیر محلی';
   }
   // 4. SENSITIVE / ROUTE_LOCAL: Targeted organizational secrets
   else if (
@@ -95,7 +99,7 @@ export function decidePolicyRoute(input: DecisionEngineInput): DecisionEngineRes
 
   // Map route to RuntimeAction
   const action: RuntimeAction =
-    route === 'EXTERNAL_DIRECT' || route === 'EXTERNAL_MASKED'
+    route === 'EXTERNAL_DIRECT'
       ? 'EXTERNAL_ALLOWED'
       : 'LOCAL_ONLY';
 
@@ -115,6 +119,8 @@ export function decidePolicyRoute(input: DecisionEngineInput): DecisionEngineRes
       conceptId: c.id,
       conceptKey: c.conceptKey,
       name: c.name,
+      nameFa: c.nameFa ?? null,
+      category: c.category ?? c.sectionTitle ?? c.nameFa ?? c.name,
       sensitivity: c.sensitivity,
       action: c.action,
       score: 1.0,
